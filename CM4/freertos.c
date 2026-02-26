@@ -22,9 +22,7 @@ const osThreadAttr_t cm4_task_attributes = {.name = "cm4_task",
                                                 (osPriority_t)osPriorityNormal,
                                             .stack_size = 128 * 4};
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
-
 void StartM4DefaultTask(void *argument);
-
 void MX_FREERTOS_Init(void);
 
 /* Handle to the UART used to output strings. */
