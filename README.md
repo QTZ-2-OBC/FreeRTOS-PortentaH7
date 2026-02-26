@@ -1,35 +1,65 @@
+[![xc compatible](https://xcfile.dev/badge.svg)](https://xcfile.dev)
+
 # FreeRTOS-PortentaH7
 
 GSoC 2020 Arduino project.
 
-[Portenta H7](https://www.arduino.cc/pro/hardware/product/portenta-h7) is a high performance board released by [Arduino](https://www.arduino.cc).
+[Portenta H7](https://www.arduino.cc/pro/hardware/product/portenta-h7) is a high
+performance board released by [Arduino](https://www.arduino.cc).
 
-## Usage
+## Tasks
 
-Compile:
-`make MCU=M7`
+### lib
 
-Upload:
-`make MCU=M7 upload`
+Directory: ./STM32H747/
 
-Clean build file:
-`make MCU=M7 clean`
+Build the static library of STM32H7 for CM4 and CM7.
 
-`MCU=M7` or `MCU=M4`
+```sh
+./build.sh M4
+./build.sh M7
+```
 
-## Example
-1. `make MCU=M4 clean`
-2. `make MCU=M7 clean`
-3. `make MCU=M4`
-4. `make MCU=M7`
-5. Connect H7 to your computer.
-6. `make MCU=M4 upload`
-7. `make MCU=M7 upload`
-8. You can see the blue LED flashing on the board.
+### m4
 
-# TODO
+Build the CM4 flash image, needs the static library to already be built!
 
-- [ ] Refactor
-- [ ] Use cmake
-- [ ] Use https://github.com/STMicroelectronics/stm32h7xx_hal_driver
-- [ ] Use https://github.com/FreeRTOS/FreeRTOS-Kernel
+```sh
+make MCU=M4
+```
+
+### m7
+
+Build the CM7 flash image, needs the static library to already be built!
+
+```sh
+make MCU=M7
+```
+
+### clean
+
+Clean all generated artifacts (including the static library).
+
+```sh
+rm -r ./CM4/libs/ || echo "CM4 lib doesn't exist! Not cleaning..."
+rm -r ./CM7/libs/ || echo "CM7 lib doesn't exist! Not cleaning..."
+
+make MCU=M7 clean
+make MCU=M4 clean
+```
+
+### flash
+
+Inputs: CORE
+
+Flash the to the specified core.
+
+```sh
+if [ "$CORE" == "m4" ]; then
+    sudo dfu-util --device 0x2341:0x035b -D ./test/test_M4.elf.bin -a0 --dfuse-address=0x08100000:leave;
+elif [ "$CORE" == "m7" ]; then
+    sudo dfu-util --device 0x2341:0x035b -D ./test/test_M7.elf.bin -a0 --dfuse-address=0x08040000:leave;
+else
+    echo "The CORE variable must be 'm4' or 'm7'!"
+fi
+```

@@ -1,6 +1,7 @@
 # Directories
 .git/
 .cache/
+.vscode/
 
 # Prerequisites
 *.d

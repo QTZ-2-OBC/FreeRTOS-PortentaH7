@@ -19,11 +19,12 @@
       pkgs = nixpkgsFor.${system};
     in {
       default = pkgs.mkShell {
-        packages = with pkgs.pkgsCross.arm-embedded; [
-          gcc
-          gnumake
-          dfu-util
-          bear
+        packages = [
+          pkgs.gcc-arm-embedded-13
+          pkgs.pkgsCross.arm-embedded.dfu-util
+          pkgs.xc
+          pkgs.gnumake
+          pkgs.bear
         ];
       };
     });
