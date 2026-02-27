@@ -56,10 +56,29 @@ Flash the to the specified core.
 
 ```sh
 if [ "$CORE" == "m4" ]; then
-    sudo dfu-util --device 0x2341:0x035b -D ./test/test_M4.elf.bin -a0 --dfuse-address=0x08100000:leave;
+    sudo dfu-util --device 0x2341:0x035b -D ./bin/test_M4.elf.bin -a0 --dfuse-address=0x08100000:leave;
 elif [ "$CORE" == "m7" ]; then
-    sudo dfu-util --device 0x2341:0x035b -D ./test/test_M7.elf.bin -a0 --dfuse-address=0x08040000:leave;
+    sudo dfu-util --device 0x2341:0x035b -D ./bin/test_M7.elf.bin -a0 --dfuse-address=0x08040000:leave;
 else
     echo "The CORE variable must be 'm4' or 'm7'!"
 fi
+```
+
+### unity
+
+Directory: ./deps/unity/
+
+Compile the Munit testing framework.
+
+```sh
+gcc -c unity.c -o unity.o
+```
+
+### test
+
+Build and run the test binary. Compile the unity framework first!
+
+```sh
+gcc ./deps/**/*.o ./Common/*_test.c -I./deps -lm -o test.bin
+./test.bin
 ```

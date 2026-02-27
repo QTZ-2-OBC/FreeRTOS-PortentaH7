@@ -20,6 +20,7 @@
     in {
       default = pkgs.mkShell {
         packages = [
+          pkgs.gcc
           pkgs.gcc-arm-embedded-13
           pkgs.pkgsCross.arm-embedded.dfu-util
           pkgs.xc
