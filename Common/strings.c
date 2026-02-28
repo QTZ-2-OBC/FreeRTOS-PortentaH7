@@ -2,18 +2,7 @@
 #include "include/common.h"
 #include <math.h>
 
-void QTZ_String_InitWithCapacity(QTZ_String *self, QTZ_ByteArray *bytes,
-                                 size_t capacity) {
-  self->bytes = bytes;
-  self->capacity = capacity;
-}
-
-void QTZ_String_Init(QTZ_String *self, QTZ_ByteArray *bytes) {
-  self->bytes = bytes;
-  self->capacity = bytes->length;
-}
-
-size_t QTZ_LengthAsString(size_t n) {
+size_t QTZ_DigitQuantity(size_t n) {
   if (n < 2) { // Handle edge cases... AKA (0, 1)
     return 1;
   } else {
@@ -22,22 +11,22 @@ size_t QTZ_LengthAsString(size_t n) {
   }
 }
 
-typedef enum {
-  QTZ_FMTSIZET_OK,
-  QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH,
-} QTZ_FMTSIZET_Result;
-
 QTZ_FMTSIZET_Result QTZ_FmtSizeT(size_t n, QTZ_ByteArray *buffer) {
+
   if (n == 0) {
     if (buffer->length <= 0) {
       return QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH;
     }
 
-    buffer->data[0] = '0';
+    if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(buffer, '0')) {
+      return QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH;
+    }
+
     return QTZ_FMTSIZET_OK;
   } else {
-    size_t buffer_length = QTZ_LengthAsString(n);
-    if (buffer->length < buffer_length) {
+    size_t buffer_length = QTZ_DigitQuantity(n);
+    size_t remaining_space = buffer->capacity - buffer->length;
+    if (remaining_space < buffer_length) {
       return QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH;
     }
 
@@ -59,7 +48,9 @@ QTZ_FMTSIZET_Result QTZ_FmtSizeT(size_t n, QTZ_ByteArray *buffer) {
         character = '?';
       }
 
-      buffer->data[i] = character;
+      if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(buffer, character)) {
+        return QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH;
+      }
     }
 
     return QTZ_FMTSIZET_OK;

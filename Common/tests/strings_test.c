@@ -1,6 +1,6 @@
-#include "../deps/unity/unity.h"
-#include "./common.c"
-#include "./strings.c"
+#include "../../deps/unity/unity.h"
+#include "../common.c"
+#include "../strings.c"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,23 +15,24 @@ void tearDown(void) {
 
 void test_QTZ_LengthAsString(void) {
   for (size_t i = 0; i < 10; i++) {
-    TEST_ASSERT_EQUAL_size_t(1, QTZ_LengthAsString(i));
+    TEST_ASSERT_EQUAL_size_t(1, QTZ_DigitQuantity(i));
   }
   for (size_t i = 10; i < 100; i++) {
-    TEST_ASSERT_EQUAL_size_t(2, QTZ_LengthAsString(i));
+    TEST_ASSERT_EQUAL_size_t(2, QTZ_DigitQuantity(i));
   }
 
   for (size_t i = 3; i < 10; i++) {
     size_t start = (size_t)pow(10, i);
     start += 1721;
-    TEST_ASSERT_EQUAL_size_t(i + 1, QTZ_LengthAsString(start));
+    TEST_ASSERT_EQUAL_size_t(i + 1, QTZ_DigitQuantity(start));
   }
 }
 
 void test_QTZ_FmtSizeT(void) {
   // Setup buffer
   uint8_t buffer[8] = {0};
-  QTZ_ByteArray byte_array = {.data = buffer, .length = 8};
+  QTZ_ByteArray byte_array = {0};
+  QTZ_ByteArray_InitWithLength(&byte_array, buffer, 8, 0);
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
@@ -41,10 +42,11 @@ void test_QTZ_FmtSizeT(void) {
     fprintf(stderr, "Testing: %d\n", number);                                  \
     size_t n = number;                                                         \
     char *expected = STR(number);                                              \
-    size_t length = QTZ_LengthAsString(n);                                     \
+    size_t length = QTZ_DigitQuantity(n);                                      \
     QTZ_FMTSIZET_Result result = QTZ_FmtSizeT(n, &byte_array);                 \
     TEST_ASSERT_EQUAL_INT(QTZ_FMTSIZET_OK, result);                            \
     TEST_ASSERT_EQUAL_STRING_LEN(expected, byte_array.data, length);           \
+    QTZ_ByteArray_Reset(&byte_array);                                          \
   }
 
   TEST_QTZ_FMTSIZET(5);

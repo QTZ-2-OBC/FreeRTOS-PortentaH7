@@ -1,18 +1,17 @@
-#ifndef QTZ_STRINGS_LIB
-#define QTZ_STRINGS_LIB
+#ifndef QTZ_LIB_STRINGS
+#define QTZ_LIB_STRINGS
 
 #include "common.h"
 
-// Holds a string data.
-typedef struct {
-	QTZ_ByteArray *bytes;
-	size_t capacity;
-}QTZ_String;
+// Get the number of digits of n.
+size_t QTZ_DigitQuantity(size_t n);
 
-// Initializes a QTZ_String with a specified capacity.
-void QTZ_String_InitWithCapacity(QTZ_String*self, QTZ_ByteArray *bytes, size_t capacity);
+typedef enum {
+  QTZ_FMTSIZET_OK,
+  QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH,
+} QTZ_FMTSIZET_Result;
 
-// Initializes a QTZ_String with the same capacity as the array length.
-void QTZ_String_Init(QTZ_String*self, QTZ_ByteArray *bytes);
+// Convert n into a string containing n.
+QTZ_FMTSIZET_Result QTZ_FmtSizeT(size_t n, QTZ_ByteArray *buffer);
 
 #endif

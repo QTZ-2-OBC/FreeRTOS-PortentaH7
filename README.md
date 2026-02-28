@@ -44,8 +44,9 @@ Clean all generated artifacts (including the static library).
 rm -r ./CM4/libs/ || echo "CM4 lib doesn't exist! Not cleaning..."
 rm -r ./CM7/libs/ || echo "CM7 lib doesn't exist! Not cleaning..."
 
-make MCU=M7 clean
-make MCU=M4 clean
+# make MCU=M7 clean
+# make MCU=M4 clean
+make clean
 ```
 
 ### flash
@@ -79,6 +80,19 @@ gcc -c unity.c -o unity.o
 Build and run the test binary. Compile the unity framework first!
 
 ```sh
-gcc ./deps/**/*.o ./Common/*_test.c -I./deps -lm -o test.bin
+gcc ./deps/**/*.o ./Common/tests/*_test.c -I./deps -lm -o test.bin
 ./test.bin
+```
+
+### bear
+
+Requires: clean
+
+Regenerate compile_commands.json databases for both cores. This enables
+autocomplete!
+
+```sh
+xc lib
+bear --output CM4/compile_commands.json -- xc m4
+bear --output CM7/compile_commands.json -- xc m7
 ```

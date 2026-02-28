@@ -1,0 +1,23 @@
+name: C CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  tests:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@v3.5.2
+    - name: Magic Nix Cache
+      uses: DeterminateSystems/magic-nix-cache-action@v13
+    - name: Build Testing Framework
+      run: nix develop --command bash -c "xc unity"
+    - name: Run Tests
+      run: nix develop --command bash -c "xc test"
