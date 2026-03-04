@@ -36,7 +36,7 @@ QTZ_BYTEARRAYSET_Result QTZ_ByteArray_Set(QTZ_ByteArray *self, size_t index,
 
 QTZ_BYTEARRAYAPPEND_Result QTZ_ByteArray_Append(QTZ_ByteArray *self,
                                                 uint8_t value) {
-  if (self->length > self->capacity) {
+  if (self->length >= self->capacity) {
     return QTZ_BYTEARRAYAPPEND_NOT_ENOUGH_SPACE;
   }
 
@@ -47,12 +47,14 @@ QTZ_BYTEARRAYAPPEND_Result QTZ_ByteArray_Append(QTZ_ByteArray *self,
 
 QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_Extend(QTZ_ByteArray *self,
                                                 QTZ_ByteArray *other) {
-  if (self->length + other->length > self->capacity) {
+  if ((self->length + other->length) >= self->capacity) {
     return QTZ_BYTEARRAYEXTEND_NOT_ENOUGH_SPACE;
   }
 
   uint8_t *dest = self->data + self->length;
   memcpy(dest, other->data, other->length);
+
+  self->length += other->length;
 
   return QTZ_BYTEARRAYEXTEND_OK;
 }
