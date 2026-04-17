@@ -26,6 +26,7 @@
           pkgs.xc
           pkgs.gnumake
           pkgs.bear
+          pkgs.picocom
         ];
       };
     });
