@@ -164,5 +164,5 @@ Monitor output from serial monitor on Linux! You may need to change the serial
 port...
 
 ```sh
-picocom -b 115200 -r -l /dev/ttyUSB0
+picocom -b 115200 -r -l /dev/ttyUSB0 --imap lfcrlf
 ```
