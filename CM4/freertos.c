@@ -56,6 +56,26 @@ void UART_Transmit(const char *msg, size_t len) {
   }
 }
 
+void UART_TransmitCStr(char *msg) { UART_Transmit(msg, strlength(msg)); }
+
+void PrintAvailableHeap(QTZ_ByteArray *buffer) {
+  char *msg = "Available HEAP SIZE: ";
+  const int msg_length = strlength(msg);
+  UART_Transmit(msg, msg_length);
+
+  size_t free_heap = xPortGetFreeHeapSize();
+  if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(free_heap, buffer)) {
+    UART_TransmitCStr("\nERROR: Failed to format free_heap as number!\n");
+    return;
+  }
+  if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(buffer, '\n')) {
+    UART_TransmitCStr("\nERROR: Failed to append '\\n'! Ending execution...\n");
+    return;
+  }
+  UART_Transmit((char *)buffer->data, buffer->length);
+  QTZ_ByteArray_Reset(buffer);
+}
+
 void StartM4DefaultTask(void *argument) {
   GPIO_InitTypeDef GPIO_InitStructure;
   GPIO_InitStructure.Pin = LED_B_Pin;
@@ -64,52 +84,47 @@ void StartM4DefaultTask(void *argument) {
   HAL_GPIO_Init(LED_B_GPIO_Port, &GPIO_InitStructure);
   HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, 1);
 
-  char *msg = "Available HEAP SIZE: ";
-  const int msg_length = strlength(msg);
-  UART_Transmit(msg, msg_length);
-
-  size_t free_heap = xPortGetFreeHeapSize();
-  uint8_t buffer[30] = {0};
-  QTZ_ByteArray array = {0};
-  QTZ_ByteArray_Init(&array, buffer, 30);
-  if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(free_heap, &array)) {
-    Error_Handler();
-  }
-  size_t digits = QTZ_DigitQuantity(free_heap);
-  if (digits < 30) {
-    buffer[digits] = '\n';
-  }
-  UART_Transmit((char *)array.data, array.length);
-  QTZ_ByteArray_Reset(&array);
+  uint8_t byteBuffer[30] = {0};
+  QTZ_ByteArray buffer = {0};
+  QTZ_ByteArray_Init(&buffer, byteBuffer, 30);
+  PrintAvailableHeap(&buffer);
+  QTZ_ByteArray_Reset(&buffer);
 
   const uint16_t SAMD_21_ADDR = 0x44;
   HAL_StatusTypeDef result;
+  int commands[] = {
+      'p', 500, 'S', 5000, 'r', 0,
+  };
+  int commands_quantity = 3;
   while (1) {
     osDelay(750);
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
-    result = HAL_UART_Receive(&huart4, array.data, 1, 100);
-    if (result == HAL_TIMEOUT) {
-      continue;
-    }
+    for (int i = 0; i < commands_quantity * 2; i++) {
+      uint8_t cmd = commands[i];
+      int timeout = commands[i + 1];
 
-    if (result != HAL_OK) {
-      char *msg = "Failed to receive from UART!\n";
-      UART_Transmit(msg, strlength(msg));
-    }
-
-    char received_byte = array.data[0];
-    switch (received_byte) {
-    case 'r': {
-      uint8_t samd_msg = '9';
-      result = HAL_I2C_Master_Transmit(&hi2c1, SAMD_21_ADDR, &samd_msg, 1, 500);
-      if (result != HAL_OK) {
-        char *msg = "Failed to send I2C message to SAMD21\n";
-        UART_Transmit(msg, strlength(msg));
+      UART_TransmitCStr("Trying command: ");
+      UART_Transmit((char *)&cmd, 1);
+      UART_TransmitCStr(" with timeout: ");
+      if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(timeout, &buffer)) {
+        UART_TransmitCStr("\nERROR: Failed to format delay as an integer!\n");
+        QTZ_ByteArray_Reset(&buffer);
+        continue;
       }
+      if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(&buffer, '\n')) {
+        UART_TransmitCStr("\nERROR: Failed to append '\\n' at end buffer!\n");
+        QTZ_ByteArray_Reset(&buffer);
+        continue;
+      }
+      UART_Transmit((char *)buffer.data, buffer.length);
+      QTZ_ByteArray_Reset(&buffer);
 
-      break;
-    }
+      result = HAL_I2C_Master_Transmit(&hi2c1, SAMD_21_ADDR, &cmd, 1, timeout);
+      if (HAL_OK != result) {
+        UART_TransmitCStr("\nERROR: Failed to transmit I2C!\n");
+        return;
+      }
     }
   }
 }
