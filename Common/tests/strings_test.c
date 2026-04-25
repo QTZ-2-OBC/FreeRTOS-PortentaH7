@@ -32,23 +32,24 @@ void test_QTZ_FmtSizeT(void) {
   // Setup buffer
   uint8_t buffer[8] = {0};
   QTZ_ByteArray byte_array = {0};
-  QTZ_ByteArray_InitWithLength(&byte_array, buffer, 8, 0);
+  QTZ_ByteArray_Init(&byte_array, buffer, 8);
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
 
 #define TEST_QTZ_FMTSIZET(number)                                              \
   {                                                                            \
-    fprintf(stderr, "Testing: %d\n", number);                                  \
     size_t n = number;                                                         \
+    fprintf(stderr, "Testing: %zu\n", n);                                      \
     char *expected = STR(number);                                              \
-    size_t length = QTZ_DigitQuantity(n);                                      \
     QTZ_FMTSIZET_Result result = QTZ_FmtSizeT(n, &byte_array);                 \
     TEST_ASSERT_EQUAL_INT(QTZ_FMTSIZET_OK, result);                            \
-    TEST_ASSERT_EQUAL_STRING_LEN(expected, byte_array.data, length);           \
+    TEST_ASSERT_EQUAL_STRING_LEN(expected, byte_array.data,                    \
+                                 byte_array.length);                           \
     QTZ_ByteArray_Reset(&byte_array);                                          \
   }
 
+  TEST_QTZ_FMTSIZET(0);
   TEST_QTZ_FMTSIZET(5);
   TEST_QTZ_FMTSIZET(7856);
   TEST_QTZ_FMTSIZET(9867);
