@@ -1,6 +1,7 @@
 #include "include/strings.h"
 #include "include/common.h"
 #include <math.h>
+#include <stdio.h>
 
 size_t QTZ_DigitQuantity(size_t n) {
   if (n < 2) { // Handle edge cases... AKA (0, 1)
@@ -12,9 +13,8 @@ size_t QTZ_DigitQuantity(size_t n) {
 }
 
 QTZ_FMTSIZET_Result QTZ_FmtSizeT(size_t n, QTZ_ByteArray *buffer) {
-
   if (n == 0) {
-    if (buffer->length <= 0) {
+    if (buffer->capacity <= 0) {
       return QTZ_FMTSIZET_BUFFER_NOT_LARGE_ENOUGH;
     }
 
