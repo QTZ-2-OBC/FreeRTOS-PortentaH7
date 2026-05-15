@@ -1,26 +1,27 @@
 
-// This file is a part of MRNIU/FreeRTOS-PortentaH7 (https://github.com/MRNIU/FreeRTOS-PortentaH7).
+// This file is a part of MRNIU/FreeRTOS-PortentaH7
+// (https://github.com/MRNIU/FreeRTOS-PortentaH7).
 //
 // usart.c for MRNIU/FreeRTOS-PortentaH7.
 
 /**
-  ******************************************************************************
-  * File Name          : USART.c
-  * Description        : This file provides code for the configuration
-  *                      of the USART instances.
-  ******************************************************************************
-  * @attention
-  *
-  * <h2><center>&copy; Copyright (c) 2020 STMicroelectronics.
-  * All rights reserved.</center></h2>
-  *
-  * This software component is licensed by ST under Ultimate Liberty license
-  * SLA0044, the "License"; You may not use this file except in compliance with
-  * the License. You may obtain a copy of the License at:
-  *                             www.st.com/SLA0044
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * File Name          : USART.c
+ * Description        : This file provides code for the configuration
+ *                      of the USART instances.
+ ******************************************************************************
+ * @attention
+ *
+ * <h2><center>&copy; Copyright (c) 2020 STMicroelectronics.
+ * All rights reserved.</center></h2>
+ *
+ * This software component is licensed by ST under Ultimate Liberty license
+ * SLA0044, the "License"; You may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at:
+ *                             www.st.com/SLA0044
+ *
+ ******************************************************************************
+ */
 
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
@@ -36,8 +37,7 @@ UART_HandleTypeDef huart6;
 
 /* LPUART1 init function */
 
-void MX_LPUART1_UART_Init(void)
-{
+void MX_LPUART1_UART_Init(void) {
 
   hlpuart1.Instance = LPUART1;
   hlpuart1.Init.BaudRate = 209700;
@@ -50,27 +50,23 @@ void MX_LPUART1_UART_Init(void)
   hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   hlpuart1.FifoMode = UART_FIFOMODE_DISABLE;
-  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
-  {
+  if (HAL_UART_Init(&hlpuart1) != HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
-  {
+  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK) {
     Error_Handler();
   }
-
 }
 /* UART4 init function */
-void MX_UART4_Init(void)
-{
+void MX_UART4_Init(void) {
 
   huart4.Instance = UART4;
   huart4.Init.BaudRate = 115200;
@@ -83,27 +79,23 @@ void MX_UART4_Init(void)
   huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart4) != HAL_OK)
-  {
+  if (HAL_UART_Init(&huart4) != HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
-  {
+  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK) {
     Error_Handler();
   }
-
 }
 /* UART7 init function */
-void MX_UART7_Init(void)
-{
+void MX_UART7_Init(void) {
 
   huart7.Instance = UART7;
   huart7.Init.BaudRate = 115200;
@@ -116,28 +108,24 @@ void MX_UART7_Init(void)
   huart7.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart7.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart7.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart7) != HAL_OK)
-  {
+  if (HAL_UART_Init(&huart7) != HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart7, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart7, UART_TXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart7, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart7, UART_RXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart7) != HAL_OK)
-  {
+  if (HAL_UARTEx_DisableFifoMode(&huart7) != HAL_OK) {
     Error_Handler();
   }
-
 }
 /* USART6 init function */
 
-void MX_USART6_UART_Init(void)
-{
+void MX_USART6_UART_Init(void) {
 
   huart6.Instance = USART6;
   huart6.Init.BaudRate = 115200;
@@ -150,34 +138,29 @@ void MX_USART6_UART_Init(void)
   huart6.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart6.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart6.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart6) != HAL_OK)
-  {
+  if (HAL_UART_Init(&huart6) != HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart6, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart6, UART_TXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart6, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart6, UART_RXFIFO_THRESHOLD_1_8) !=
+      HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart6) != HAL_OK)
-  {
+  if (HAL_UARTEx_DisableFifoMode(&huart6) != HAL_OK) {
     Error_Handler();
   }
-
 }
 
-void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
-{
+void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle) {
 
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  if(uartHandle->Instance==LPUART1)
-  {
-  /* USER CODE BEGIN LPUART1_MspInit 0 */
+  if (uartHandle->Instance == LPUART1) {
+    /* USER CODE BEGIN LPUART1_MspInit 0 */
 
-  /* USER CODE END LPUART1_MspInit 0 */
+    /* USER CODE END LPUART1_MspInit 0 */
     /* LPUART1 clock enable */
     __HAL_RCC_LPUART1_CLK_ENABLE();
 
@@ -186,22 +169,20 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     PA10     ------> LPUART1_RX
     PA9     ------> LPUART1_TX
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_9;
+    GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_9;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF3_LPUART;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN LPUART1_MspInit 1 */
+    /* USER CODE BEGIN LPUART1_MspInit 1 */
 
-  /* USER CODE END LPUART1_MspInit 1 */
-  }
-  else if(uartHandle->Instance==UART4)
-  {
-  /* USER CODE BEGIN UART4_MspInit 0 */
+    /* USER CODE END LPUART1_MspInit 1 */
+  } else if (uartHandle->Instance == UART4) {
+    /* USER CODE BEGIN UART4_MspInit 0 */
 
-  /* USER CODE END UART4_MspInit 0 */
+    /* USER CODE END UART4_MspInit 0 */
     /* UART4 clock enable */
     __HAL_RCC_UART4_CLK_ENABLE();
 
@@ -225,15 +206,13 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     GPIO_InitStruct.Alternate = GPIO_AF8_UART4;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN UART4_MspInit 1 */
+    /* USER CODE BEGIN UART4_MspInit 1 */
 
-  /* USER CODE END UART4_MspInit 1 */
-  }
-  else if(uartHandle->Instance==UART7)
-  {
-  /* USER CODE BEGIN UART7_MspInit 0 */
+    /* USER CODE END UART4_MspInit 1 */
+  } else if (uartHandle->Instance == UART7) {
+    /* USER CODE BEGIN UART7_MspInit 0 */
 
-  /* USER CODE END UART7_MspInit 0 */
+    /* USER CODE END UART7_MspInit 0 */
     /* UART7 clock enable */
     __HAL_RCC_UART7_CLK_ENABLE();
 
@@ -252,22 +231,20 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     GPIO_InitStruct.Alternate = GPIO_AF11_UART7;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_8|GPIO_PIN_9;
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_9;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF7_UART7;
     HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN UART7_MspInit 1 */
+    /* USER CODE BEGIN UART7_MspInit 1 */
 
-  /* USER CODE END UART7_MspInit 1 */
-  }
-  else if(uartHandle->Instance==USART6)
-  {
-  /* USER CODE BEGIN USART6_MspInit 0 */
+    /* USER CODE END UART7_MspInit 1 */
+  } else if (uartHandle->Instance == USART6) {
+    /* USER CODE BEGIN USART6_MspInit 0 */
 
-  /* USER CODE END USART6_MspInit 0 */
+    /* USER CODE END USART6_MspInit 0 */
     /* USART6 clock enable */
     __HAL_RCC_USART6_CLK_ENABLE();
 
@@ -276,27 +253,25 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     PG9     ------> USART6_RX
     PG14     ------> USART6_TX
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_14;
+    GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_14;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF7_USART6;
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN USART6_MspInit 1 */
+    /* USER CODE BEGIN USART6_MspInit 1 */
 
-  /* USER CODE END USART6_MspInit 1 */
+    /* USER CODE END USART6_MspInit 1 */
   }
 }
 
-void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
-{
+void HAL_UART_MspDeInit(UART_HandleTypeDef *uartHandle) {
 
-  if(uartHandle->Instance==LPUART1)
-  {
-  /* USER CODE BEGIN LPUART1_MspDeInit 0 */
+  if (uartHandle->Instance == LPUART1) {
+    /* USER CODE BEGIN LPUART1_MspDeInit 0 */
 
-  /* USER CODE END LPUART1_MspDeInit 0 */
+    /* USER CODE END LPUART1_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_LPUART1_CLK_DISABLE();
 
@@ -304,17 +279,15 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     PA10     ------> LPUART1_RX
     PA9     ------> LPUART1_TX
     */
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_10|GPIO_PIN_9);
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_10 | GPIO_PIN_9);
 
-  /* USER CODE BEGIN LPUART1_MspDeInit 1 */
+    /* USER CODE BEGIN LPUART1_MspDeInit 1 */
 
-  /* USER CODE END LPUART1_MspDeInit 1 */
-  }
-  else if(uartHandle->Instance==UART4)
-  {
-  /* USER CODE BEGIN UART4_MspDeInit 0 */
+    /* USER CODE END LPUART1_MspDeInit 1 */
+  } else if (uartHandle->Instance == UART4) {
+    /* USER CODE BEGIN UART4_MspDeInit 0 */
 
-  /* USER CODE END UART4_MspDeInit 0 */
+    /* USER CODE END UART4_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_UART4_CLK_DISABLE();
 
@@ -326,15 +299,13 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
 
-  /* USER CODE BEGIN UART4_MspDeInit 1 */
+    /* USER CODE BEGIN UART4_MspDeInit 1 */
 
-  /* USER CODE END UART4_MspDeInit 1 */
-  }
-  else if(uartHandle->Instance==UART7)
-  {
-  /* USER CODE BEGIN UART7_MspDeInit 0 */
+    /* USER CODE END UART4_MspDeInit 1 */
+  } else if (uartHandle->Instance == UART7) {
+    /* USER CODE BEGIN UART7_MspDeInit 0 */
 
-  /* USER CODE END UART7_MspDeInit 0 */
+    /* USER CODE END UART7_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_UART7_CLK_DISABLE();
 
@@ -346,17 +317,15 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_15);
 
-    HAL_GPIO_DeInit(GPIOF, GPIO_PIN_6|GPIO_PIN_8|GPIO_PIN_9);
+    HAL_GPIO_DeInit(GPIOF, GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_9);
 
-  /* USER CODE BEGIN UART7_MspDeInit 1 */
+    /* USER CODE BEGIN UART7_MspDeInit 1 */
 
-  /* USER CODE END UART7_MspDeInit 1 */
-  }
-  else if(uartHandle->Instance==USART6)
-  {
-  /* USER CODE BEGIN USART6_MspDeInit 0 */
+    /* USER CODE END UART7_MspDeInit 1 */
+  } else if (uartHandle->Instance == USART6) {
+    /* USER CODE BEGIN USART6_MspDeInit 0 */
 
-  /* USER CODE END USART6_MspDeInit 0 */
+    /* USER CODE END USART6_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_USART6_CLK_DISABLE();
 
@@ -364,11 +333,11 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     PG9     ------> USART6_RX
     PG14     ------> USART6_TX
     */
-    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_9|GPIO_PIN_14);
+    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_9 | GPIO_PIN_14);
 
-  /* USER CODE BEGIN USART6_MspDeInit 1 */
+    /* USER CODE BEGIN USART6_MspDeInit 1 */
 
-  /* USER CODE END USART6_MspDeInit 1 */
+    /* USER CODE END USART6_MspDeInit 1 */
   }
 }
 

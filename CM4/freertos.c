@@ -6,6 +6,7 @@
 
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
+#include "cmsis_os2.h"
 #include "i2c.h"
 #include "main.h"
 #include "portable.h"
@@ -19,20 +20,21 @@
 #include "usart.h"
 #include <common.h>
 #include <math.h>
+#include <rs485.h>
 #include <stdint.h>
 #include <strings.h>
 
-osThreadId_t cm4_task_handle;
-const osThreadAttr_t cm4_task_attributes = {.name = "cm4_task",
-                                            .priority =
-                                                (osPriority_t)osPriorityNormal,
-                                            .stack_size = 128 * 4};
+osThreadId_t samd_thread;
+const osThreadAttr_t samd_thread_attributes = {
+    .name = "cm4_task",
+    .priority = (osPriority_t)osPriorityNormal,
+    .stack_size = 128 * 4};
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
-void StartM4DefaultTask(void *argument);
+void SAMD_Routine(void *argument);
 void MX_FREERTOS_Init(void);
 
 void MX_FREERTOS_Init(void) {
-  cm4_task_handle = osThreadNew(StartM4DefaultTask, NULL, &cm4_task_attributes);
+  samd_thread = osThreadNew(SAMD_Routine, NULL, &samd_thread_attributes);
 }
 
 uint16_t strlength(char *msg) {
@@ -74,55 +76,70 @@ void PrintAvailableHeap(QTZ_ByteArray *buffer) {
   QTZ_ByteArray_Reset(buffer);
 }
 
-void StartM4DefaultTask(void *argument) {
+void SAMD_Routine(void *argument) {
   GPIO_InitTypeDef GPIO_InitStructure;
   GPIO_InitStructure.Pin = LED_B_Pin;
   GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStructure.Speed = GPIO_SPEED_LOW;
   HAL_GPIO_Init(LED_B_GPIO_Port, &GPIO_InitStructure);
-  HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, 1);
+  HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);
 
   uint8_t byteBuffer[30] = {0};
   QTZ_ByteArray buffer = {0};
   QTZ_ByteArray_Init(&buffer, byteBuffer, 30);
-  PrintAvailableHeap(&buffer);
+  // PrintAvailableHeap(&buffer);
   QTZ_ByteArray_Reset(&buffer);
 
-  const uint16_t SAMD_21_ADDR = 0x44;
-  HAL_StatusTypeDef result;
-  int commands[] = {
-      'p', 500, 'S', 5000, 'r', 0,
-  };
-  int commands_quantity = 3;
+  if (QTZ_BYTEARRAYEXTEND_OK !=
+      QTZ_ByteArray_ExtendCStr(&buffer, "Hola Mundo!")) {
+    // UART_TransmitCStr("\nERROR: Failed to append 'Hola Mundo! Que tal?'! "
+    //                   "Ending execution...\n");
+    Error_Handler();
+  }
+  HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+
   while (1) {
     osDelay(750);
-    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-
-    for (int i = 0; i < commands_quantity * 2; i++) {
-      uint8_t cmd = commands[i];
-      int timeout = commands[i + 1];
-
-      UART_TransmitCStr("Trying command: ");
-      UART_Transmit((char *)&cmd, 1);
-      UART_TransmitCStr(" with timeout: ");
-      if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(timeout, &buffer)) {
-        UART_TransmitCStr("\nERROR: Failed to format delay as an integer!\n");
-        QTZ_ByteArray_Reset(&buffer);
-        continue;
-      }
-      if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(&buffer, '\n')) {
-        UART_TransmitCStr("\nERROR: Failed to append '\\n' at end buffer!\n");
-        QTZ_ByteArray_Reset(&buffer);
-        continue;
-      }
-      UART_Transmit((char *)buffer.data, buffer.length);
-      QTZ_ByteArray_Reset(&buffer);
-
-      result = HAL_I2C_Master_Transmit(&hi2c1, SAMD_21_ADDR, &cmd, 1, timeout);
-      if (HAL_OK != result) {
-        UART_TransmitCStr("\nERROR: Failed to transmit I2C!\n");
-        return;
-      }
+    if (QTZ_SENDRS485_OK != QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
+      // UART_TransmitCStr("\nERROR: Failed to transmit!\n");
+      Error_Handler();
     }
+    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
   }
+
+  // const uint16_t SAMD_21_ADDR = 0x44;
+  // HAL_StatusTypeDef result;
+  // int commands[] = {
+  //     'p', 500, 'S', 5000, 'r', 0,
+  // };
+  // int commands_quantity = 3;
+  // while (1) {
+  //   osDelay(750);
+  //   HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+  //
+  //   for (int i = 0; i < commands_quantity * 2; i++) {
+  //     uint8_t cmd = commands[i];
+  //     int timeout = commands[i + 1];
+  //
+  //     UART_TransmitCStr("Trying command: ");
+  //     UART_Transmit((char *)&cmd, 1);
+  //     UART_TransmitCStr(" with timeout: ");
+  //     if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(timeout, &buffer)) {
+  //       UART_TransmitCStr("\nERROR: Failed to format delay as an
+  //       integer!\n"); QTZ_ByteArray_Reset(&buffer); continue;
+  //     }
+  //     if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(&buffer, '\n')) {
+  //       UART_TransmitCStr("\nERROR: Failed to append '\\n' at end
+  //       buffer!\n"); QTZ_ByteArray_Reset(&buffer); continue;
+  //     }
+  //     UART_Transmit((char *)buffer.data, buffer.length);
+  //     QTZ_ByteArray_Reset(&buffer);
+  //
+  //     result = HAL_I2C_Master_Transmit(&hi2c1, SAMD_21_ADDR, &cmd, 1,
+  //     timeout); if (HAL_OK != result) {
+  //       UART_TransmitCStr("\nERROR: Failed to transmit I2C!\n");
+  //       return;
+  //     }
+  //   }
+  // }
 }

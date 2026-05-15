@@ -54,5 +54,9 @@ typedef enum {
 // Attempts to append the provided value to the byte array.
 QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_Extend(QTZ_ByteArray*self, QTZ_ByteArray*other);
 
+// Attempts to extend the byte array with a c style string.
+//
+// The null terminator value is not copied over to the byte array!
+QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_ExtendCStr(QTZ_ByteArray *self, char *other);
 
 #endif

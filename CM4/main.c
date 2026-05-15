@@ -23,8 +23,9 @@ int main(void) {
 
   osKernelInitialize(); /* Call init function for freertos objects (in
                            freertos.c) */
-  MX_UART4_Init();
-  MX_I2C1_Init();
+  MX_UART4_Init();      // UART for RS485
+  // MX_LPUART1_UART_Init();
+  // MX_I2C1_Init();
   MX_FREERTOS_Init();
   /* Start scheduler */
   osKernelStart();

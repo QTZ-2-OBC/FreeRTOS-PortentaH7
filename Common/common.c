@@ -59,4 +59,11 @@ QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_Extend(QTZ_ByteArray *self,
   return QTZ_BYTEARRAYEXTEND_OK;
 }
 
+QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_ExtendCStr(QTZ_ByteArray *self,
+                                                    char *other) {
+  QTZ_ByteArray tmpBuffer = {};
+  QTZ_ByteArray_Init(&tmpBuffer, (uint8_t *)other, strlen(other));
+  return QTZ_ByteArray_Extend(self, &tmpBuffer);
+}
+
 void QTZ_ByteArray_Reset(QTZ_ByteArray *self) { self->length = 0; }

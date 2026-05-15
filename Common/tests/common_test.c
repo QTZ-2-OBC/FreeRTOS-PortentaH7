@@ -62,6 +62,11 @@ void test_QTZ_ByteArray_Usage() {
   // to store 4 bytes!
   TEST_ASSERT_EQUAL_INT(QTZ_BYTEARRAYEXTEND_NOT_ENOUGH_SPACE,
                         QTZ_ByteArray_Extend(&array2, &array));
+
+  QTZ_ByteArray_Reset(&array2);
+  // Copy CString into byte array.
+  TEST_ASSERT_EQUAL_INT(QTZ_BYTEARRAYEXTEND_OK,
+                        QTZ_ByteArray_ExtendCStr(&array2, "Hola Mundo!"));
 }
 
 int main(void) {
