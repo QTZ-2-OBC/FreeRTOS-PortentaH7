@@ -1,22 +1,92 @@
+#include "cmsis_os2.h"
+#include "stm32h7xx_hal_gpio.h"
 #include <rs485.h>
 #include <stm32h7xx_hal_uart.h>
 #include <strings.h>
 #include <usart.h>
 
+// Enabled transmission but also disables reception
+void QTZ_RS485_EnableTransmission() {
+  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_SET);
+  osDelay(5);
+}
+
+// Enabled reception but also disables transmission
+void QTZ_RS485_EnableReception() {
+  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_RESET);
+  osDelay(5);
+}
+
 void QTZ_RS485_InitGPIO() {
+  // Initialize RS485 mode
   GPIO_InitTypeDef QTZ_RS485_GPIO = {};
-  QTZ_RS485_GPIO.Pin = GPIO_PIN_10;
+  QTZ_RS485_GPIO.Pin = GPIO_PIN_7;
   QTZ_RS485_GPIO.Mode = GPIO_MODE_OUTPUT_PP;
-  QTZ_RS485_GPIO.Speed = GPIO_SPEED_LOW;
-  // QTZ_RS485_GPIO.Pull = GPIO_NOPULL;
-  // QTZ_RS485_GPIO.Alternate = GPIO_AF3_LPUART;
-  HAL_GPIO_Init(QTZ_RS485_GPIO_BASE, &QTZ_RS485_GPIO);
+  QTZ_RS485_GPIO.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOC, &QTZ_RS485_GPIO);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);
+
+  // Disable RS232 mode
+  QTZ_RS485_GPIO.Pin = GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOC, &QTZ_RS485_GPIO);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_SET);
+
+  // Enable Half Duplex
+  QTZ_RS485_GPIO.Pin = GPIO_PIN_8;
+  HAL_GPIO_Init(GPIOA, &QTZ_RS485_GPIO);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+
+  // Enable receiver mode
+  QTZ_RS485_GPIO.Pin = QTZ_RS485_DE_Pin;
+  HAL_GPIO_Init(QTZ_RS485_DE_BASE, &QTZ_RS485_GPIO);
+  QTZ_RS485_GPIO.Pin = QTZ_RS485_RE_Pin;
+  HAL_GPIO_Init(QTZ_RS485_RE_BASE, &QTZ_RS485_GPIO);
+  QTZ_RS485_EnableReception();
+}
+
+QTZ_SENDRS485_Result QTZ_SendRS485_Cstr(UART_HandleTypeDef *handle,
+                                        char *const data, size_t len,
+                                        uint32_t timeout) {
+  // Switch to transmit mode
+  QTZ_RS485_EnableTransmission();
+  HAL_StatusTypeDef result =
+      HAL_UART_Transmit(handle, (uint8_t *)data, len, timeout);
+
+  // Wait for the shift register to fully clock out the last byte
+  while (__HAL_UART_GET_FLAG(handle, UART_FLAG_TC) == RESET) {
+  }
+
+  // Switch back to receive mode after
+  QTZ_RS485_EnableReception();
+
+  if (HAL_OK != result) {
+    switch (HAL_UART_GetError(handle)) {
+    case HAL_UART_ERROR_PE:
+      return QTZ_SENDRS485_Parity_Error;
+    case HAL_UART_ERROR_NE:
+      return QTZ_SENDRS485_Noise_Error;
+    case HAL_UART_ERROR_FE:
+      return QTZ_SENDRS485_Frame_Error;
+    case HAL_UART_ERROR_ORE:
+      return QTZ_SENDRS485_Overrun_Error;
+    case HAL_UART_ERROR_DMA:
+      return QTZ_SENDRS485_DMA_Transfer_Error;
+    case HAL_UART_ERROR_RTO:
+      return QTZ_SENDRS485_ReceiverTimeout;
+    default:
+      return QTZ_SENDRS485_Unknown;
+    }
+  }
+  return QTZ_SENDRS485_OK;
 }
 
 QTZ_SENDRS485_Result QTZ_SendRS485(UART_HandleTypeDef *handle,
                                    QTZ_ByteArray *buffer, uint32_t timeout) {
   // Switch to transmit mode
-  HAL_GPIO_WritePin(QTZ_RS485_GPIO_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_SET);
   if (HAL_OK !=
       HAL_UART_Transmit(handle, buffer->data, buffer->length, timeout)) {
     switch (HAL_UART_GetError(handle)) {
@@ -37,6 +107,7 @@ QTZ_SENDRS485_Result QTZ_SendRS485(UART_HandleTypeDef *handle,
     }
   }
   // Switch back to receive mode immediately after
-  HAL_GPIO_WritePin(QTZ_RS485_GPIO_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_RESET);
   return QTZ_SENDRS485_OK;
 }

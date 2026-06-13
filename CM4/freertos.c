@@ -90,22 +90,49 @@ void SAMD_Routine(void *argument) {
   // PrintAvailableHeap(&buffer);
   QTZ_ByteArray_Reset(&buffer);
 
-  if (QTZ_BYTEARRAYEXTEND_OK !=
-      QTZ_ByteArray_ExtendCStr(&buffer, "Hola Mundo!")) {
-    // UART_TransmitCStr("\nERROR: Failed to append 'Hola Mundo! Que tal?'! "
-    //                   "Ending execution...\n");
-    Error_Handler();
-  }
-  HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+  // HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
+  // while (1) {
+  //   UART_TransmitCStr("Hola Mundo!\n");
+  // }
 
+  // if (QTZ_BYTEARRAYEXTEND_OK !=
+  //     QTZ_ByteArray_ExtendCStr(&buffer, "Hola Mundo!\n")) {
+  //   // UART_TransmitCStr("\nERROR: Failed to append 'Hola Mundo! Que tal?'! "
+  //   //                   "Ending execution...\n");
+  //   Error_Handler();
+  // }
+
+  QTZ_RS485_InitGPIO();
   while (1) {
-    osDelay(750);
-    if (QTZ_SENDRS485_OK != QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
-      // UART_TransmitCStr("\nERROR: Failed to transmit!\n");
+    HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
+    osDelay(1000);
+    if (QTZ_SENDRS485_OK !=
+        QTZ_SendRS485_Cstr(&huart4, "HOLA\n", 5, mainHAL_MAX_TIMEOUT)) {
       Error_Handler();
     }
-    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+
+    // if (QTZ_SENDRS485_OK !=
+    //     QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
+    //   Error_Handler();
+    // }
   }
+
+  // while (1) {
+  //   UART_Transmit((const char *)buffer.data, buffer.length);
+  // }
+  // while (1) {
+  //   UART_TransmitCStr("\nHOla!!!");
+  // }
+
+  // while (1) {
+  //   osDelay(750);
+  //   if (QTZ_SENDRS485_OK !=
+  //       QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
+  //     // UART_TransmitCStr("\nERROR: Failed to transmit!\n");
+  //     Error_Handler();
+  //   }
+  //   HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+  // }
 
   // const uint16_t SAMD_21_ADDR = 0x44;
   // HAL_StatusTypeDef result;
