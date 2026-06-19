@@ -7,6 +7,7 @@
 #include "main.h"
 #include "Legacy/stm32_hal_legacy.h"
 #include "cmsis_os.h"
+#include "debug.h"
 #include "fmc.h"
 #include "gpio.h"
 #include "i2c.h"
@@ -24,6 +25,7 @@ int main(void) {
   osKernelInitialize(); /* Call init function for freertos objects (in
                            freertos.c) */
   MX_UART4_Init();      // UART for RS485
+  QTZ_Debug_Init();
   // MX_LPUART1_UART_Init();
   // MX_I2C1_Init();
   MX_FREERTOS_Init();
