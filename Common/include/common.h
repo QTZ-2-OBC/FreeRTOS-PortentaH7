@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Booleans for QTZ library
+typedef enum {
+	QTZ_BOOL_FALSE,
+	QTZ_BOOL_TRUE 
+}QTZ_Bool;
 
 // Holds an array of bytes
 typedef struct {

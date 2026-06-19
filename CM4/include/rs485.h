@@ -15,7 +15,7 @@
 #define QTZ_RS485_RE_Pin GPIO_PIN_10
 #define QTZ_RS485_RE_BASE GPIOJ
 
-// Initialize the GPIO pin for RS485 transmission.
+// Initialize the GPIO pins for RS485 transmission.
 void QTZ_RS485_InitGPIO();
 
 typedef enum {
@@ -28,7 +28,7 @@ typedef enum {
   QTZ_SENDRS485_ReceiverTimeout,
   QTZ_SENDRS485_Unknown,
 } QTZ_SENDRS485_Result;
-QTZ_SENDRS485_Result QTZ_SendRS485(UART_HandleTypeDef *handle, QTZ_ByteArray *buffer, uint32_t timeout);
+QTZ_SENDRS485_Result QTZ_RS485_Send(UART_HandleTypeDef *handle, QTZ_ByteArray *buffer, uint32_t timeout);
 
-QTZ_SENDRS485_Result QTZ_SendRS485_Cstr(UART_HandleTypeDef *handle, char *const data, size_t len, uint32_t timeout);
+QTZ_SENDRS485_Result QTZ_RS485_SendCStr(UART_HandleTypeDef *handle, char *const data, size_t len, uint32_t timeout);
 #endif 
