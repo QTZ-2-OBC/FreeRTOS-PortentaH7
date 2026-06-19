@@ -7,6 +7,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "cmsis_os2.h"
+#include "debug.h"
 #include "i2c.h"
 #include "main.h"
 #include "portable.h"
@@ -50,7 +51,7 @@ uint16_t strlength(char *msg) {
 
 void UART_Transmit(const char *msg, size_t len) {
   HAL_StatusTypeDef result =
-      HAL_UART_Transmit(&huart4, (uint8_t *)msg, len, mainHAL_MAX_TIMEOUT);
+      HAL_UART_Transmit(&huart7, (uint8_t *)msg, len, mainHAL_MAX_TIMEOUT);
   if (result != HAL_OK) {
     Error_Handler();
   }
@@ -77,6 +78,7 @@ void PrintAvailableHeap(QTZ_ByteArray *buffer) {
 }
 
 void SAMD_Routine(void *argument) {
+  // NOTE: Initialize the LED pin on blue.
   GPIO_InitTypeDef GPIO_InitStructure;
   GPIO_InitStructure.Pin = LED_B_Pin;
   GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
@@ -84,89 +86,32 @@ void SAMD_Routine(void *argument) {
   HAL_GPIO_Init(LED_B_GPIO_Port, &GPIO_InitStructure);
   HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);
 
+  QTZ_RS485_InitGPIO();
+
   uint8_t byteBuffer[30] = {0};
   QTZ_ByteArray buffer = {0};
   QTZ_ByteArray_Init(&buffer, byteBuffer, 30);
-  // PrintAvailableHeap(&buffer);
+  PrintAvailableHeap(&buffer);
   QTZ_ByteArray_Reset(&buffer);
 
-  // HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
-  // while (1) {
-  //   UART_TransmitCStr("Hola Mundo!\n");
-  // }
-
-  // if (QTZ_BYTEARRAYEXTEND_OK !=
-  //     QTZ_ByteArray_ExtendCStr(&buffer, "Hola Mundo!\n")) {
-  //   // UART_TransmitCStr("\nERROR: Failed to append 'Hola Mundo! Que tal?'! "
-  //   //                   "Ending execution...\n");
-  //   Error_Handler();
-  // }
-
-  QTZ_RS485_InitGPIO();
+  int commands[] = {
+      'p', 500, 'S', 5000, 'r', 0,
+  };
+  int commands_quantity = 3;
   while (1) {
-    HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
-    osDelay(1000);
-    if (QTZ_SENDRS485_OK !=
-        QTZ_SendRS485_Cstr(&huart4, "HOLA\n", 5, mainHAL_MAX_TIMEOUT)) {
-      Error_Handler();
+    osDelay(750);
+    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+
+    for (int i = 0; i < commands_quantity * 2; i += 2) {
+      uint8_t cmd = commands[i];
+      int timeout = commands[i + 1];
+      QTZ_Debug_Log("Trying command: %c - %d\n", cmd, timeout);
+
+      QTZ_SENDRS485_Result result =
+          QTZ_RS485_SendCStr(&huart4, (char *)&cmd, 1, timeout);
+      if (QTZ_SENDRS485_OK != result) {
+        QTZ_Debug_Error("Failed to send command! Error: %d\n", result);
+      }
     }
-
-    // if (QTZ_SENDRS485_OK !=
-    //     QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
-    //   Error_Handler();
-    // }
   }
-
-  // while (1) {
-  //   UART_Transmit((const char *)buffer.data, buffer.length);
-  // }
-  // while (1) {
-  //   UART_TransmitCStr("\nHOla!!!");
-  // }
-
-  // while (1) {
-  //   osDelay(750);
-  //   if (QTZ_SENDRS485_OK !=
-  //       QTZ_SendRS485(&huart4, &buffer, mainHAL_MAX_TIMEOUT)) {
-  //     // UART_TransmitCStr("\nERROR: Failed to transmit!\n");
-  //     Error_Handler();
-  //   }
-  //   HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-  // }
-
-  // const uint16_t SAMD_21_ADDR = 0x44;
-  // HAL_StatusTypeDef result;
-  // int commands[] = {
-  //     'p', 500, 'S', 5000, 'r', 0,
-  // };
-  // int commands_quantity = 3;
-  // while (1) {
-  //   osDelay(750);
-  //   HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-  //
-  //   for (int i = 0; i < commands_quantity * 2; i++) {
-  //     uint8_t cmd = commands[i];
-  //     int timeout = commands[i + 1];
-  //
-  //     UART_TransmitCStr("Trying command: ");
-  //     UART_Transmit((char *)&cmd, 1);
-  //     UART_TransmitCStr(" with timeout: ");
-  //     if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(timeout, &buffer)) {
-  //       UART_TransmitCStr("\nERROR: Failed to format delay as an
-  //       integer!\n"); QTZ_ByteArray_Reset(&buffer); continue;
-  //     }
-  //     if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(&buffer, '\n')) {
-  //       UART_TransmitCStr("\nERROR: Failed to append '\\n' at end
-  //       buffer!\n"); QTZ_ByteArray_Reset(&buffer); continue;
-  //     }
-  //     UART_Transmit((char *)buffer.data, buffer.length);
-  //     QTZ_ByteArray_Reset(&buffer);
-  //
-  //     result = HAL_I2C_Master_Transmit(&hi2c1, SAMD_21_ADDR, &cmd, 1,
-  //     timeout); if (HAL_OK != result) {
-  //       UART_TransmitCStr("\nERROR: Failed to transmit I2C!\n");
-  //       return;
-  //     }
-  //   }
-  // }
 }
