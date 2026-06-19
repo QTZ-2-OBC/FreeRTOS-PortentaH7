@@ -95,7 +95,7 @@ void SAMD_Routine(void *argument) {
   QTZ_ByteArray_Reset(&buffer);
 
   int commands[] = {
-      'p', 500, 'S', 5000, 'r', 0,
+      'p', 500, 'S', 5000, 'r', 10,
   };
   int commands_quantity = 3;
   while (1) {
@@ -111,7 +111,10 @@ void SAMD_Routine(void *argument) {
           QTZ_RS485_SendCStr(&huart4, (char *)&cmd, 1, timeout);
       if (QTZ_SENDRS485_OK != result) {
         QTZ_Debug_Error("Failed to send command! Error: %d\n", result);
+        Error_Handler();
       }
+
+      osDelay(timeout);
     }
   }
 }
