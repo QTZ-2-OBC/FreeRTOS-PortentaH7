@@ -109,40 +109,38 @@ void QTZ_RS485_InitGPIO() {
   QTZ_RS485_ABTerm(QTZ_BOOL_TRUE);
 }
 
-QTZ_SENDRS485_Result QTZ_RS485_SendCStr(UART_HandleTypeDef *handle,
-                                        char *const data, size_t len,
+QTZ_SENDRS485_Result QTZ_RS485_SendCStr(char *const data, size_t len,
                                         uint32_t timeout) {
   QTZ_ByteArray arr;
   QTZ_ByteArray_InitWithLength(&arr, (uint8_t *)data, len, len);
-  return QTZ_RS485_Send(handle, &arr, timeout);
+  return QTZ_RS485_Send(&arr, timeout);
 }
 
-QTZ_SENDRS485_Result QTZ_RS485_Send(UART_HandleTypeDef *handle,
-                                    QTZ_ByteArray *buffer, uint32_t timeout) {
+QTZ_SENDRS485_Result QTZ_RS485_Send(QTZ_ByteArray *buffer, uint32_t timeout) {
   // Switch to transmit mode
   QTZ_RS485_EnableTransmission();
-  HAL_StatusTypeDef result =
-      HAL_UART_Transmit(handle, buffer->data, buffer->length, timeout);
+  HAL_StatusTypeDef result = HAL_UART_Transmit(
+      QTZ_RS485_UART_HANDLE, buffer->data, buffer->length, timeout);
 
   // Wait for the shift register to fully clock out the last byte
-  while (__HAL_UART_GET_FLAG(handle, UART_FLAG_TC) == RESET) {
+  while (__HAL_UART_GET_FLAG(QTZ_RS485_UART_HANDLE, UART_FLAG_TC) == RESET) {
   }
 
   // Switch back to receive mode after
   QTZ_RS485_EnableReception();
 
   if (HAL_OK != result) {
-    switch (HAL_UART_GetError(handle)) {
+    switch (HAL_UART_GetError(QTZ_RS485_UART_HANDLE)) {
     case HAL_UART_ERROR_PE:
-      return QTZ_SENDRS485_Parity_Error;
+      return QTZ_SENDRS485_ParityError;
     case HAL_UART_ERROR_NE:
-      return QTZ_SENDRS485_Noise_Error;
+      return QTZ_SENDRS485_NoiseError;
     case HAL_UART_ERROR_FE:
-      return QTZ_SENDRS485_Frame_Error;
+      return QTZ_SENDRS485_FrameError;
     case HAL_UART_ERROR_ORE:
-      return QTZ_SENDRS485_Overrun_Error;
+      return QTZ_SENDRS485_OverrunError;
     case HAL_UART_ERROR_DMA:
-      return QTZ_SENDRS485_DMA_Transfer_Error;
+      return QTZ_SENDRS485_DMATransferError;
     case HAL_UART_ERROR_RTO:
       return QTZ_SENDRS485_ReceiverTimeout;
     default:
@@ -150,4 +148,36 @@ QTZ_SENDRS485_Result QTZ_RS485_Send(UART_HandleTypeDef *handle,
     }
   }
   return QTZ_SENDRS485_OK;
+}
+
+QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer,
+                                          uint32_t timeout) {
+  if (0 == QTZ_ByteArray_Remaining(buffer)) {
+    return QTZ_RECEIVERS485_NotEnoughSpace;
+  }
+
+  QTZ_RS485_EnableReception();
+  HAL_StatusTypeDef result =
+      HAL_UART_Receive(QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer),
+                       QTZ_ByteArray_Remaining(buffer), timeout);
+  if (HAL_OK != result) {
+    switch (HAL_UART_GetError(QTZ_RS485_UART_HANDLE)) {
+    case HAL_UART_ERROR_PE:
+      return QTZ_RECEIVERS485_ParityError;
+    case HAL_UART_ERROR_NE:
+      return QTZ_RECEIVERS485_NoiseError;
+    case HAL_UART_ERROR_FE:
+      return QTZ_RECEIVERS485_FrameError;
+    case HAL_UART_ERROR_ORE:
+      return QTZ_RECEIVERS485_OverrunError;
+    case HAL_UART_ERROR_DMA:
+      return QTZ_RECEIVERS485_DMATransferError;
+    case HAL_UART_ERROR_RTO:
+      return QTZ_RECEIVERS485_ReceiverTimeout;
+    default:
+      return QTZ_RECEIVERS485_Unknown;
+    }
+  }
+
+  return QTZ_RECEIVERS485_OK;
 }

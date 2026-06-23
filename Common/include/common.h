@@ -64,4 +64,10 @@ QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_Extend(QTZ_ByteArray*self, QTZ_ByteArra
 // The null terminator value is not copied over to the byte array!
 QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_ExtendCStr(QTZ_ByteArray *self, char *other);
 
+// Returns the remaining quantity of free bytes on the array.
+size_t QTZ_ByteArray_Remaining(QTZ_ByteArray *self) ;
+
+// Returns the last free position of data contained in the array.
+uint8_t* QTZ_ByteArray_Current(QTZ_ByteArray *self);
+
 #endif

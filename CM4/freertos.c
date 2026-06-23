@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "i2c.h"
 #include "main.h"
+#include "milo.h"
 #include "portable.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_gpio.h"
@@ -49,32 +50,9 @@ uint16_t strlength(char *msg) {
   return length;
 }
 
-void UART_Transmit(const char *msg, size_t len) {
-  HAL_StatusTypeDef result =
-      HAL_UART_Transmit(&huart7, (uint8_t *)msg, len, mainHAL_MAX_TIMEOUT);
-  if (result != HAL_OK) {
-    Error_Handler();
-  }
-}
-
-void UART_TransmitCStr(char *msg) { UART_Transmit(msg, strlength(msg)); }
-
-void PrintAvailableHeap(QTZ_ByteArray *buffer) {
-  char *msg = "Available HEAP SIZE: ";
-  const int msg_length = strlength(msg);
-  UART_Transmit(msg, msg_length);
-
+void PrintAvailableHeap() {
   size_t free_heap = xPortGetFreeHeapSize();
-  if (QTZ_FMTSIZET_OK != QTZ_FmtSizeT(free_heap, buffer)) {
-    UART_TransmitCStr("\nERROR: Failed to format free_heap as number!\n");
-    return;
-  }
-  if (QTZ_BYTEARRAYAPPEND_OK != QTZ_ByteArray_Append(buffer, '\n')) {
-    UART_TransmitCStr("\nERROR: Failed to append '\\n'! Ending execution...\n");
-    return;
-  }
-  UART_Transmit((char *)buffer->data, buffer->length);
-  QTZ_ByteArray_Reset(buffer);
+  QTZ_Debug_Log("Available HEAP SIZE: %d\n", free_heap);
 }
 
 void SAMD_Routine(void *argument) {
@@ -87,15 +65,16 @@ void SAMD_Routine(void *argument) {
   HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);
 
   QTZ_RS485_InitGPIO();
+  PrintAvailableHeap();
 
-  uint8_t byteBuffer[30] = {0};
-  QTZ_ByteArray buffer = {0};
-  QTZ_ByteArray_Init(&buffer, byteBuffer, 30);
-  PrintAvailableHeap(&buffer);
-  QTZ_ByteArray_Reset(&buffer);
+  const size_t BUFFER_SIZE = 1024;
+  uint8_t data[BUFFER_SIZE];
+  QTZ_ByteArray buffer;
+  QTZ_ByteArray_Init(&buffer, data, BUFFER_SIZE);
 
-  int commands[] = {
-      'p', 500, 'S', 2000, 'r', 10,
+  uint32_t commands[] = {
+      QTZ_MILO_Ping,     1000, QTZ_MILO_Snapshot,        4000,
+      QTZ_MILO_ResetCam, 3000, QTZ_MILO_ImageStatistics, 1000,
   };
   int commands_quantity = 3;
   while (1) {
@@ -103,15 +82,23 @@ void SAMD_Routine(void *argument) {
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
     for (int i = 0; i < commands_quantity * 2; i += 2) {
-      uint8_t cmd = commands[i];
-      int timeout = commands[i + 1];
-      QTZ_Debug_Log("Trying command: %c - %d\n", cmd, timeout);
+      QTZ_MILO_COMMAND cmd = commands[i];
+      uint32_t timeout = commands[i + 1];
 
-      QTZ_SENDRS485_Result result =
-          QTZ_RS485_SendCStr(&huart4, (char *)&cmd, 1, timeout);
-      if (QTZ_SENDRS485_OK != result) {
-        QTZ_Debug_Error("Failed to send command! Error: %d\n", result);
+      QTZ_MILO_RESULT result = QTZ_MILO_SendCommand(cmd, &buffer, timeout);
+      if (QTZ_MILO_OK != result) {
+        QTZ_Debug_Error(
+            "Encountered an error when sending command to MILO! Error: %d\n",
+            result);
         Error_Handler();
+      }
+
+      if (QTZ_MILO_ImageStatistics == cmd) {
+        if (buffer.length == 0) {
+          QTZ_Debug_Error("No data written to buffer!\n");
+          Error_Handler();
+        }
+        QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
       }
 
       osDelay(timeout);

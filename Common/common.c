@@ -67,3 +67,11 @@ QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_ExtendCStr(QTZ_ByteArray *self,
 }
 
 void QTZ_ByteArray_Reset(QTZ_ByteArray *self) { self->length = 0; }
+
+size_t QTZ_ByteArray_Remaining(QTZ_ByteArray *self) {
+  return self->capacity - self->length;
+}
+
+uint8_t *QTZ_ByteArray_Current(QTZ_ByteArray *self) {
+  return self->data + self->length;
+}
