@@ -95,7 +95,7 @@ void SAMD_Routine(void *argument) {
   QTZ_ByteArray_Reset(&buffer);
 
   int commands[] = {
-      'p', 500, 'S', 5000, 'r', 10,
+      'p', 500, 'S', 2000, 'r', 10,
   };
   int commands_quantity = 3;
   while (1) {
