@@ -9,9 +9,9 @@
 extern uint8_t *__DEBUG_INNER_BUFFER[QTZ_DEBUG_CAPACITY];
 const uint32_t QTZ_DEBUG_MAX_TIMEOUT = 0xFFFFFFFFUL;
 
-void QTZ_Debug_Init() { MX_UART7_Init(); }
+void QTZ_Debug_Init() { MX_USART6_UART_Init(); }
 void QTZ_Debug_Print() {
   uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
-  HAL_UART_Transmit(&huart7, (uint8_t *)__DEBUG_INNER_BUFFER, size,
+  HAL_UART_Transmit(&huart6, (uint8_t *)__DEBUG_INNER_BUFFER, size,
                     QTZ_DEBUG_MAX_TIMEOUT);
 }

@@ -158,11 +158,20 @@ bear --output CM4/compile_commands.json -- xc m4
 bear --output CM7/compile_commands.json -- xc m7
 ```
 
-### monitor
+### monitor_usb
 
 Monitor output from serial monitor on Linux! You may need to change the serial
 port...
 
 ```sh
 picocom -b 115200 -r -l /dev/ttyUSB0 --imap lfcrlf
+```
+
+### monitor_acm
+
+Monitor output from serial monitor on Linux! You may need to change the serial
+port...
+
+```sh
+picocom -b 115200 -r -l /dev/ttyACM0 --imap lfcrlf
 ```

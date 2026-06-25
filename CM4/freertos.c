@@ -39,17 +39,6 @@ void MX_FREERTOS_Init(void) {
   samd_thread = osThreadNew(SAMD_Routine, NULL, &samd_thread_attributes);
 }
 
-uint16_t strlength(char *msg) {
-  uint16_t length = 0;
-  while (1) {
-    if (msg[length] == 0) {
-      break;
-    }
-    length++;
-  }
-  return length;
-}
-
 void PrintAvailableHeap() {
   size_t free_heap = xPortGetFreeHeapSize();
   QTZ_Debug_Log("Available HEAP SIZE: %d\n", free_heap);
