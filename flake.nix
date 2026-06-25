@@ -27,6 +27,7 @@
           pkgs.gnumake
           pkgs.bear
           pkgs.picocom
+          pkgs.clang-tools # Formatter and others...
         ];
       };
     });
