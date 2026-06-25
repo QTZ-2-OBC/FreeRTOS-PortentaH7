@@ -4,6 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define QTZ_ByteArray_Create(buffer_name, inner_memory_name, size) \
+  uint8_t inner_memory_name[size];\
+  QTZ_ByteArray buffer_name;\
+  QTZ_ByteArray_Init(&buffer_name, inner_memory_name, size);
+
+#define QTZ_ByteArray_CreateOnlyBuffer(buffer_name, inner_memory_name, size) \
+  QTZ_ByteArray buffer_name;\
+  QTZ_ByteArray_Init(&buffer_name, inner_memory_name, size);
+
 // Booleans for QTZ library
 typedef enum {
 	QTZ_BOOL_FALSE,

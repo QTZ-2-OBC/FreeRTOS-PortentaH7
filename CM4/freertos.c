@@ -56,10 +56,7 @@ void SAMD_Routine(void *argument) {
   QTZ_RS485_InitGPIO();
   PrintAvailableHeap();
 
-  const size_t BUFFER_SIZE = 1024;
-  uint8_t data[BUFFER_SIZE];
-  QTZ_ByteArray buffer;
-  QTZ_ByteArray_Init(&buffer, data, BUFFER_SIZE);
+  QTZ_ByteArray_Create(buffer, data, 1024);
 
   uint32_t commands[] = {
       QTZ_MILO_Ping,     1000, QTZ_MILO_Snapshot,        4000,
@@ -68,6 +65,7 @@ void SAMD_Routine(void *argument) {
   int commands_quantity = 3;
   while (1) {
     osDelay(750);
+    QTZ_ByteArray_Reset(&buffer);
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
     for (int i = 0; i < commands_quantity * 2; i += 2) {
