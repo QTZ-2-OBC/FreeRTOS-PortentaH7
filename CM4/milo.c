@@ -4,9 +4,9 @@
 
 // FIXME: This is a temporary implementation, it doesn't quite handle all
 // errors!
-QTZ_MILO_RESULT QTZ_MILO_SendCommand(QTZ_MILO_COMMAND cmd,
+QTZ_MILO_Result QTZ_MILO_SendCommand(QTZ_MILO_COMMAND cmd,
                                      QTZ_ByteArray *response_buffer,
-                                     uint32_t timeout) {
+                                     uint16_t response_size, uint32_t timeout) {
   QTZ_Debug_Log("MILO: Command: %c - %d\n", cmd, timeout);
   {
     QTZ_SENDRS485_Result result = QTZ_RS485_SendCStr((char *)&cmd, 1, timeout);
@@ -16,9 +16,10 @@ QTZ_MILO_RESULT QTZ_MILO_SendCommand(QTZ_MILO_COMMAND cmd,
     }
   }
 
+  QTZ_Debug_Log("MILO: Waiting for response...\n");
   {
     QTZ_RECEIVERS485_Result result =
-        QTZ_RS485_Receive(response_buffer, timeout);
+        QTZ_RS485_Receive(response_buffer, response_size, timeout);
     if (QTZ_RECEIVERS485_OK != result) {
       QTZ_Debug_Error(
           "MILO: Failed to receive response from command! Error: %d\n", result);

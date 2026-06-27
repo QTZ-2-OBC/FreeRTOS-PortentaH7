@@ -1,5 +1,6 @@
 #include "cmsis_os2.h"
 #include "common.h"
+#include "debug.h"
 #include "stm32h7xx_hal_gpio.h"
 #include <rs485.h>
 #include <stm32h7xx_hal_uart.h>
@@ -7,16 +8,21 @@
 #include <usart.h>
 
 // Enabled transmission but also disables reception
-void QTZ_RS485_EnableTransmission() {
-  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
+void QTZ_RS485_BeginTransmission() {
   HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_SET);
-  osDelay(5);
+  osDelay(QTZ_RS485_PRE_DELAY);
+}
+void QTZ_RS485_EndTransmission() {
+  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_RESET);
+  osDelay(QTZ_RS485_POST_DELAY);
 }
 
-// Enabled reception but also disables transmission
-void QTZ_RS485_EnableReception() {
-  HAL_GPIO_WritePin(QTZ_RS485_DE_BASE, QTZ_RS485_DE_Pin, GPIO_PIN_RESET);
+void QTZ_RS485_BeginReception() {
   HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_RESET);
+  osDelay(5);
+}
+void QTZ_RS485_EndReception() {
+  HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
   osDelay(5);
 }
 
@@ -107,6 +113,7 @@ void QTZ_RS485_InitGPIO() {
   // Enable only stuff we care about...
   QTZ_RS485_EnableRS485(QTZ_BOOL_TRUE);
   QTZ_RS485_ABTerm(QTZ_BOOL_TRUE);
+  QTZ_RS485_BeginReception();
 }
 
 QTZ_SENDRS485_Result QTZ_RS485_SendCStr(char *const data, size_t len,
@@ -118,7 +125,8 @@ QTZ_SENDRS485_Result QTZ_RS485_SendCStr(char *const data, size_t len,
 
 QTZ_SENDRS485_Result QTZ_RS485_Send(QTZ_ByteArray *buffer, uint32_t timeout) {
   // Switch to transmit mode
-  QTZ_RS485_EnableTransmission();
+  QTZ_RS485_EndReception();
+  QTZ_RS485_BeginTransmission();
   HAL_StatusTypeDef result = HAL_UART_Transmit(
       QTZ_RS485_UART_HANDLE, buffer->data, buffer->length, timeout);
 
@@ -127,7 +135,8 @@ QTZ_SENDRS485_Result QTZ_RS485_Send(QTZ_ByteArray *buffer, uint32_t timeout) {
   }
 
   // Switch back to receive mode after
-  QTZ_RS485_EnableReception();
+  QTZ_RS485_EndTransmission();
+  QTZ_RS485_BeginReception();
 
   if (HAL_OK != result) {
     switch (HAL_UART_GetError(QTZ_RS485_UART_HANDLE)) {
@@ -150,18 +159,33 @@ QTZ_SENDRS485_Result QTZ_RS485_Send(QTZ_ByteArray *buffer, uint32_t timeout) {
   return QTZ_SENDRS485_OK;
 }
 
-QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer,
+QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
                                           uint32_t timeout) {
-  if (0 == QTZ_ByteArray_Remaining(buffer)) {
+  if (size > QTZ_ByteArray_Remaining(buffer)) {
     return QTZ_RECEIVERS485_NotEnoughSpace;
   }
 
-  QTZ_RS485_EnableReception();
-  HAL_StatusTypeDef result =
-      HAL_UART_Receive(QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer),
-                       QTZ_ByteArray_Remaining(buffer), timeout);
+  // NOTE: Clear NEF and ORE to receive the whole message of the wire.
+  __HAL_UART_CLEAR_NEFLAG(QTZ_RS485_UART_HANDLE);
+  __HAL_UART_CLEAR_OREFLAG(QTZ_RS485_UART_HANDLE);
+  QTZ_RS485_BeginReception();
+  HAL_UART_Receive(QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer), size,
+                   timeout);
+  HAL_StatusTypeDef result = HAL_UART_Receive(
+      QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer), size, timeout);
   if (HAL_OK != result) {
-    switch (HAL_UART_GetError(QTZ_RS485_UART_HANDLE)) {
+    QTZ_Debug_Log("HAL_UART result: %d\n", result);
+    if (HAL_TIMEOUT == result) {
+      return QTZ_RECEIVERS485_Timeout;
+    }
+
+    if (HAL_BUSY == result) {
+      return QTZ_RECEIVERS485_Busy;
+    }
+
+    uint32_t inner_error = HAL_UART_GetError(QTZ_RS485_UART_HANDLE);
+    QTZ_Debug_Log("HAL_UART inner error: %d\n", inner_error);
+    switch (inner_error) {
     case HAL_UART_ERROR_PE:
       return QTZ_RECEIVERS485_ParityError;
     case HAL_UART_ERROR_NE:
@@ -178,6 +202,8 @@ QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer,
       return QTZ_RECEIVERS485_Unknown;
     }
   }
+
+  buffer->length += size;
 
   return QTZ_RECEIVERS485_OK;
 }

@@ -169,9 +169,11 @@ picocom -b 115200 -r -l /dev/ttyUSB0 --imap lfcrlf
 
 ### monitor_acm
 
+Inputs: TTY
+
 Monitor output from serial monitor on Linux! You may need to change the serial
 port...
 
 ```sh
-picocom -b 115200 -r -l /dev/ttyACM0 --imap lfcrlf
+picocom -b 115200 -r -l "$TTY" --imap lfcrlf
 ```

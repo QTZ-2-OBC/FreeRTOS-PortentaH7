@@ -11,6 +11,7 @@
 #include "fmc.h"
 #include "gpio.h"
 #include "i2c.h"
+#include "rs485.h"
 #include "usart.h"
 
 void MX_FREERTOS_Init(void);
@@ -26,6 +27,7 @@ int main(void) {
                            freertos.c) */
   MX_UART4_Init();      // UART for RS485
   QTZ_Debug_Init();
+  QTZ_RS485_InitGPIO();
   // MX_LPUART1_UART_Init();
   // MX_I2C1_Init();
   MX_FREERTOS_Init();
@@ -37,7 +39,7 @@ void Error_Handler(void) {
   GPIO_InitTypeDef GPIO_InitStructure;
   GPIO_InitStructure.Pin = LED_R_Pin;
   GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStructure.Speed = GPIO_SPEED_LOW;
+  GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_R_GPIO_Port, &GPIO_InitStructure);
   HAL_GPIO_WritePin(LED_R_GPIO_Port, LED_R_Pin, 1);
   /* Infinite loop */
