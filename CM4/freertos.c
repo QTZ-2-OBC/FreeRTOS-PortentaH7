@@ -30,7 +30,7 @@ osThreadId_t samd_thread;
 const osThreadAttr_t samd_thread_attributes = {
     .name = "cm4_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 128 * 4};
+    .stack_size = 128 * 8};
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
 void SAMD_Routine(void *argument);
 void MX_FREERTOS_Init(void);
@@ -57,76 +57,82 @@ void SAMD_Routine(void *argument) {
 
   QTZ_ByteArray_Create(buffer, data, 64);
 
-  // clang-format off
-  uint32_t commands[] = {
-      QTZ_MILO_Ping, 1, 7000, // Ping the module, find out if it's ok!
-      // QTZ_MILO_Snapshot, 1, 4000, // Take a picture
-      // QTZ_MILO_ImageStatistics, 7, 1000, // Retrieve image statistics!
-      // QTZ_MILO_ResetCam, 1, 3000, // Reset the camera to save the picture!
+  int commands_quantity = 4;
+  // QTZ_Command commands[] = {};
+  QTZ_Command commands[] = {
+      // Ping the module, find out if it's ok!
+      {
+          .command_id = QTZ_MILO_Ping,
+          .response_size = 1,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+      },
+      // Take a picture
+      {
+          .command_id = QTZ_MILO_Snapshot,
+          .response_size = 5,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+      },
+      // Retrieve image statistics!
+      {
+          .command_id = QTZ_MILO_ImageStatistics,
+          .response_size = 5,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+      },
+      // Reset the camera to save the picture!
+      {
+          .command_id = QTZ_MILO_ResetCam,
+          .response_size = 5,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+      },
   };
-  // clang-format on
-  int commands_quantity = 1;
-
-  // while (1) {
-  //   osDelay(750);
-  //   HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-  //
-  // {
-  // 	QTZ_Debug_Log("Sending msg...\n");
-  // 	QTZ_SENDRS485_Result res = QTZ_RS485_SendCStr("ACT", 3, 3000);
-  // 	if (res != QTZ_SENDRS485_OK) {
-  // 		QTZ_Debug_Log("Result is: %d\n", res);
-  // 		continue;
-  // 	}
-  // }
-  //
-  // QTZ_Debug_Log("Waiting for msg...\n");
-  //   QTZ_RECEIVERS485_Result result = QTZ_RS485_Receive(&buffer, 1, 3000);
-  // // uint8_t * new_data = buffer.data << 8;
-  //   QTZ_Debug_Log("Received result: %d - %.*s\n", result, buffer.length,
-  //                 buffer.data);
-  // QTZ_ByteArray_Reset(&buffer);
-  // }
 
   while (1) {
     osDelay(750);
     QTZ_ByteArray_Reset(&buffer);
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
-    // for (int i = 0; i < commands_quantity * 3; i += 3) {
-    //   QTZ_MILO_COMMAND cmd = commands[i];
-    //   uint16_t response_size = commands[i + 1];
-    //   uint32_t timeout = commands[i + 2];
-
-    uint32_t timeout = 7000;
-    uint16_t response_size = 2;
-
-    {
-      QTZ_Debug_Log("Sending msg...\n");
-      QTZ_SENDRS485_Result res = QTZ_RS485_SendCStr("p", 1, timeout);
-      if (res != QTZ_SENDRS485_OK) {
-        QTZ_Debug_Log("Result is: %d\n", res);
-        continue;
+    for (int i = 0; i < commands_quantity; i++) {
+      QTZ_Command cmd = commands[i];
+      QTZ_Debug_Log("MILO: Command: %c - %d:%d - Expects: %d\n", cmd.command_id,
+                    cmd.send_timeout, cmd.recv_timeout, cmd.response_size);
+      {
+        QTZ_SENDRS485_Result result =
+            QTZ_RS485_SendCStr((char *)&cmd.command_id, 1, cmd.send_timeout);
+        if (QTZ_SENDRS485_OK != result) {
+          QTZ_Debug_Error("MILO: Failed to send command! Error: %d\n", result);
+          Error_Handler();
+        }
       }
+
+      QTZ_Debug_Log("MILO: Waiting for response...\n");
+      // {
+      //   QTZ_RECEIVERS485_Result result =
+      //       QTZ_RS485_Receive(&buffer, cmd.response_size, cmd.recv_timeout);
+      //   if (QTZ_RECEIVERS485_OK != result) {
+      //     QTZ_Debug_Error(
+      //         "MILO: Failed to receive response from command! Error: %d\n",
+      //         result);
+      //     Error_Handler();
+      //   }
+      // }
+
+      // uint8_t response_status = buffer.data[0];
+      // QTZ_Debug_Log("MILO: Received response: %d - %c\n", response_status,
+      //               response_status);
+      //
+      // if (QTZ_MILO_ImageStatistics == cmd.command_id) {
+      //   if (buffer.length == 0) {
+      //     QTZ_Debug_Error("No data written to buffer!\n");
+      //     Error_Handler();
+      //   }
+      //   QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data +
+      //   1);
+      // }
     }
-
-    QTZ_Debug_Log("Waiting for msg...\n");
-    QTZ_RECEIVERS485_Result result =
-        QTZ_RS485_Receive(&buffer, response_size, timeout);
-    QTZ_Debug_Log("Received result: %d - '%.*s'\n", result, buffer.length,
-                  buffer.data);
-    QTZ_ByteArray_Reset(&buffer);
-
-    // if (QTZ_MILO_ImageStatistics == cmd) {
-    //   if (buffer.length == 0) {
-    //     QTZ_Debug_Error("No data written to buffer!\n");
-    //     Error_Handler();
-    //   }
-    //   QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data +
-    //   1);
-    // }
-
-    osDelay(timeout);
-    // }
+    osDelay(5000);
   }
 }
