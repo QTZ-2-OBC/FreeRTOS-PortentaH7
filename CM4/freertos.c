@@ -30,7 +30,8 @@ osThreadId_t samd_thread;
 const osThreadAttr_t samd_thread_attributes = {
     .name = "cm4_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 128 * 8};
+    .stack_size = 256 * 8,
+};
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
 void SAMD_Routine(void *argument);
 void MX_FREERTOS_Init(void);
@@ -109,29 +110,29 @@ void SAMD_Routine(void *argument) {
       }
 
       QTZ_Debug_Log("MILO: Waiting for response...\n");
-      // {
-      //   QTZ_RECEIVERS485_Result result =
-      //       QTZ_RS485_Receive(&buffer, cmd.response_size, cmd.recv_timeout);
-      //   if (QTZ_RECEIVERS485_OK != result) {
-      //     QTZ_Debug_Error(
-      //         "MILO: Failed to receive response from command! Error: %d\n",
-      //         result);
-      //     Error_Handler();
-      //   }
-      // }
+      {
+        QTZ_RECEIVERS485_Result result =
+            QTZ_RS485_Receive(&buffer, cmd.response_size, cmd.recv_timeout);
+        if (QTZ_RECEIVERS485_OK != result) {
+          QTZ_Debug_Error(
+              "MILO: Failed to receive response from command! Error: %d\n",
+              result);
+          Error_Handler();
+        }
+      }
 
-      // uint8_t response_status = buffer.data[0];
-      // QTZ_Debug_Log("MILO: Received response: %d - %c\n", response_status,
-      //               response_status);
-      //
-      // if (QTZ_MILO_ImageStatistics == cmd.command_id) {
-      //   if (buffer.length == 0) {
-      //     QTZ_Debug_Error("No data written to buffer!\n");
-      //     Error_Handler();
-      //   }
-      //   QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data +
-      //   1);
-      // }
+      uint8_t response_status = buffer.data[0];
+      QTZ_Debug_Log("MILO: Received response: D:%d C:%c - '%.*s'\n",
+                    response_status, response_status, buffer.length,
+                    buffer.data);
+
+      if (QTZ_MILO_ImageStatistics == cmd.command_id) {
+        if (buffer.length == 0) {
+          QTZ_Debug_Error("No data written to buffer!\n");
+          Error_Handler();
+        }
+        QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
+      }
     }
     osDelay(5000);
   }
