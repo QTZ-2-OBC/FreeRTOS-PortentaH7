@@ -44,7 +44,7 @@ typedef enum {
 } QTZ_MILO_Labels;
 
 typedef enum {
-  QTZ_MILO_OK,
+  QTZ_MILO_OK = '0',
   QTZ_MILO_Timeout,
 } QTZ_MILO_Result;
 

@@ -58,27 +58,35 @@ void SAMD_Routine(void *argument) {
 
   QTZ_ByteArray_Create(buffer, data, 64);
 
-  int commands_quantity = 4;
+  int commands_quantity = 5;
   // QTZ_Command commands[] = {};
   QTZ_Command commands[] = {
       // Ping the module, find out if it's ok!
       {
           .command_id = QTZ_MILO_Ping,
-          .response_size = 1,
+          .response_size = 5,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+      },
+      // Activate earthlimb model
+      {
+          .command_id = QTZ_MILO_EnableEarthlimbModel,
+          .response_size = 19,
+          .send_timeout = 1000,
+          .recv_timeout = 7000,
+          .post_delay = 3000, // Wait for an image to arrive...
+      },
+      // Retrieve image statistics!
+      {
+          .command_id = QTZ_MILO_ImageStatistics,
+          .response_size = 8,
           .send_timeout = 1000,
           .recv_timeout = 7000,
       },
       // Take a picture
       {
           .command_id = QTZ_MILO_Snapshot,
-          .response_size = 5,
-          .send_timeout = 1000,
-          .recv_timeout = 7000,
-      },
-      // Retrieve image statistics!
-      {
-          .command_id = QTZ_MILO_ImageStatistics,
-          .response_size = 5,
+          .response_size = 14,
           .send_timeout = 1000,
           .recv_timeout = 7000,
       },
@@ -97,7 +105,12 @@ void SAMD_Routine(void *argument) {
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
     for (int i = 0; i < commands_quantity; i++) {
+      QTZ_ByteArray_Reset(&buffer);
       QTZ_Command cmd = commands[i];
+      if (cmd.pre_delay != 0) {
+        osDelay(cmd.pre_delay);
+      }
+
       QTZ_Debug_Log("MILO: Command: %c - %d:%d - Expects: %d\n", cmd.command_id,
                     cmd.send_timeout, cmd.recv_timeout, cmd.response_size);
       {
@@ -121,10 +134,16 @@ void SAMD_Routine(void *argument) {
         }
       }
 
-      uint8_t response_status = buffer.data[0];
+      QTZ_MILO_Result response_status = buffer.data[0];
       QTZ_Debug_Log("MILO: Received response: D:%d C:%c - '%.*s'\n",
                     response_status, response_status, buffer.length,
                     buffer.data);
+
+      if (response_status != QTZ_MILO_OK) {
+        QTZ_Debug_Error("MILO: The response status is not 'D:%d'!",
+                        QTZ_MILO_OK);
+        Error_Handler();
+      }
 
       if (QTZ_MILO_ImageStatistics == cmd.command_id) {
         if (buffer.length == 0) {
@@ -132,6 +151,10 @@ void SAMD_Routine(void *argument) {
           Error_Handler();
         }
         QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
+      }
+
+      if (cmd.post_delay != 0) {
+        osDelay(cmd.post_delay);
       }
     }
     osDelay(5000);

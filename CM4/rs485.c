@@ -166,11 +166,9 @@ QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
   }
 
   // NOTE: Clear NEF and ORE to receive the whole message of the wire.
-  // __HAL_UART_CLEAR_NEFLAG(QTZ_RS485_UART_HANDLE);
-  // __HAL_UART_CLEAR_OREFLAG(QTZ_RS485_UART_HANDLE);
+  __HAL_UART_CLEAR_NEFLAG(QTZ_RS485_UART_HANDLE);
+  __HAL_UART_CLEAR_OREFLAG(QTZ_RS485_UART_HANDLE);
   QTZ_RS485_BeginReception();
-  HAL_UART_Receive(QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer), size,
-                   timeout);
   HAL_StatusTypeDef result = HAL_UART_Receive(
       QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer), size, timeout);
   if (HAL_OK != result) {
