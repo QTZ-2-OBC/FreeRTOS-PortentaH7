@@ -1,9 +1,7 @@
 #include "cmsis_os2.h"
 #include "common.h"
 #include "debug.h"
-#include "stm32h7xx_hal_gpio.h"
 #include <rs485.h>
-#include <stm32h7xx_hal_uart.h>
 #include <strings.h>
 #include <usart.h>
 
