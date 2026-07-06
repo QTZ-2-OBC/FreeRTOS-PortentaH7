@@ -1,23 +1,5 @@
 #ifndef __milo_H
 #define __milo_H
-#include "common.h"
-
-typedef struct {
-  // Send operation timeout.
-  uint32_t send_timeout;
-  // Receive operation timeout.
-  uint32_t recv_timeout;
-  // Delay before doing any operation.
-  uint32_t pre_delay;
-  // Delay after doing all operations.
-  uint32_t post_delay;
-  // The size of the response in bytes.
-  //
-  // This amount will be written to the provided buffer.
-  uint16_t response_size;
-  // The command ID that will be sent.
-  uint8_t command_id;
-} QTZ_Command;
 
 typedef enum {
   QTZ_MILO_Snapshot = 'S',             // '[S]napshot',
@@ -43,11 +25,4 @@ typedef enum {
   QTZ_MILO_NoLabel = 'N',      // An invalid label was identified
 } QTZ_MILO_Labels;
 
-typedef enum {
-  QTZ_MILO_OK = '0',
-  QTZ_MILO_Timeout,
-} QTZ_MILO_Result;
-
-QTZ_MILO_Result QTZ_MILO_SendCommand(QTZ_Command cmd,
-                                     QTZ_ByteArray *response_buffer);
 #endif
