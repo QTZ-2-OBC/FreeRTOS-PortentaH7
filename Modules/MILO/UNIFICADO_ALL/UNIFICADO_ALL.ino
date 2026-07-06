@@ -74,51 +74,57 @@ void sendCommand(char cmd) {
   Wire.endTransmission();
   delay(100);
 
-  String i2c_response = "";
+  char i2c_response[64] = {};
   Wire.requestFrom((uint8_t)OPENMV_ADDR, (uint8_t)64);
   
-  while (Wire.available()) {
-    char c = Wire.read();
-    // OpenMV rellena con caracteres nulos o FF cuando no hay datos
-    if (c != 0 && c != 255 && c != '\n') { 
-      i2c_response += c;
+  for (int i = 0; i < 64; i++) {
+    if (Wire.available()) { 
+      char c = Wire.read();
+      if (c != 0 && c != 255 && c != '\n') { 
+        i2c_response[i] = c;
+      }
     }
   }
   
-  Serial.print("Respuesta I2C: ");
-  Serial.println(i2c_response);
-  Serial1.print(i2c_response);
+  Serial.print("Respuesta I2C: '");
+  Serial.print(i2c_response);
+  Serial.println("'");
+
+  digitalWrite(TX_ENABLE_PIN, HIGH);
+  Serial1.print (i2c_response);
+  Serial1.flush();
+  digitalWrite(TX_ENABLE_PIN, LOW);
 
   // Comando R para activar el Envío de la imagen por SPI 
-  if(cmd == 'R' && i2c_response.indexOf("SPI_READY") >= 0) {
+  // if(cmd == 'R' && i2c_response.indexOf("SPI_READY") >= 0) {
     
-    Serial.println("Iniciando comunicacion SPI...");
-    delay(100); 
-    char datos_recibidos[17]; // 16 bytes + caracter nulo para imprimir
+  //   Serial.println("Iniciando comunicacion SPI...");
+  //   delay(100); 
+  //   char datos_recibidos[17]; // 16 bytes + caracter nulo para imprimir
     
-    // Configuración para SPI 
-    SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));//cambio a 250000
+  //   // Configuración para SPI 
+  //   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));//cambio a 250000
 
-    digitalWrite(csPin, LOW); 
-    delay(5); // Pequeño delay de estabilización
+  //   digitalWrite(csPin, LOW); 
+  //   delay(5); // Pequeño delay de estabilización
     
-    // Transferencia SPI bidireccional (Enviamos 16, recibimos 16)
-    for (int i = 0; i < 16; i++) {
-      datos_recibidos[i] = SPI.transfer(str[i]);
-    }
-    datos_recibidos[16] = '\0'; // Terminador nulo para evitar basura en Serial.print
+  //   // Transferencia SPI bidireccional (Enviamos 16, recibimos 16)
+  //   for (int i = 0; i < 16; i++) {
+  //     datos_recibidos[i] = SPI.transfer(str[i]);
+  //   }
+  //   datos_recibidos[16] = '\0'; // Terminador nulo para evitar basura en Serial.print
     
-    digitalWrite(csPin, HIGH); 
-    SPI.endTransaction();
+  //   digitalWrite(csPin, HIGH); 
+  //   SPI.endTransaction();
     
-    Serial.print("Recibido via SPI (Tamano Imagen): ");
-    Serial.println(datos_recibidos);
+  //   Serial.print("Recibido via SPI (Tamano Imagen): ");
+  //   Serial.println(datos_recibidos);
     
-    delay(2000); // Retraso antes de la siguiente petición
-  } 
-  else if (cmd == 'R') {
-    Serial.println("Error: OpenMV no envio SPI_READY");
-  }
+  //   delay(2000); // Retraso antes de la siguiente petición
+  // } 
+  // else if (cmd == 'R') {
+  //   Serial.println("Error: OpenMV no envio SPI_READY");
+  // }
 }
 
 void loop() {
@@ -161,6 +167,7 @@ void loop() {
 
     Serial.println("Reset HIGH");
     digitalWrite(OPENMV_RESET_PIN, HIGH);
+    Serial1.print("0DONE");
   }
   Serial.println("DONE!");
 }

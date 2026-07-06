@@ -5,7 +5,7 @@ import uos
 import gc
 from pyb import I2C
 
-OK_STATUS = '0'
+OK_STATUS = "0"
 
 # Sensor
 def init_sensor():
@@ -139,17 +139,17 @@ while True:
             response_status = OK_STATUS
 
             # -------- MODELOS --------
-            if cmd == 'E' and current_model != 1:
+            if cmd == 'E':
                 load_model(1)
                 mode = 1
                 response = "MODEL EARTHLIMB ON"
 
-            elif cmd == 'H' and current_model != 2:
+            elif cmd == 'H':
                 load_model(2)
                 mode = 2
                 response = "MODEL HYPSO ON"
 
-            elif cmd == 'T' and current_model != 3:
+            elif cmd == 'T':
                 load_model(3)
                 mode = 3
                 response = "MODEL SENTINEL ON"
@@ -207,10 +207,9 @@ while True:
                     saved_flag
                 )
             elif cmd == 'p':
-                response = ""
+                response = "PING"
 
-            if response != "":
-                i2c.send("{}{}".format(response_status, response))
+            i2c.send("{}{}".format(response_status, response))
 
     except OSError:
         pass
