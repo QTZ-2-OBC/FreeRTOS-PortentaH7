@@ -1,5 +1,5 @@
-#ifndef __milo_H
-#define __milo_H
+#ifndef QTZ_LIB_MILO
+#define QTZ_LIB_MILO
 
 typedef enum {
   QTZ_MILO_Snapshot = 'S',             // '[S]napshot',

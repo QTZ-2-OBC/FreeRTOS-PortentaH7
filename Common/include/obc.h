@@ -1,7 +1,6 @@
-#ifndef __obc_H
-#define __obc_H
+#ifndef QTZ_LIB_OBC
+#define QTZ_LIB_OBC
 #include "common.h"
-#include <stdint.h>
 
 typedef enum {
   QTZ_OBC_MODULE_MILO,
