@@ -16,6 +16,7 @@ int _execve(char *name, char **argv, char **env) {
   return -1;
 }
 int _fork(void) { return -1; }
+struct stat {};
 int _fstat(int file, struct stat *st) {
   (void)file;
   (void)st;
