@@ -53,8 +53,7 @@ void ADCS_Routine(void *argument) {
 
   QTZ_ByteArray_Create(buffer, data, 64);
 
-  int commands_quantity = 5;
-  // QTZ_Command commands[] = {};
+  int commands_quantity = 1;
   QTZ_OBC_Command commands[] = {
       // Ping the module, find out if it's ok!
       {
