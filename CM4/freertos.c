@@ -4,27 +4,18 @@
 //
 // freertos.c for MRNIU/FreeRTOS-PortentaH7.
 
+// NOTE: Even though is marked as unused, don't uncomment this file!
 #include "FreeRTOS.h"
-#include "cmsis_os.h"
 #include "cmsis_os2.h"
 #include "debug.h"
-#include "i2c.h"
 #include "main.h"
 #include "milo.h"
 #include "obc.h"
 #include "portable.h"
-#include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_gpio.h"
-#include "stm32h7xx_hal_i2c.h"
-#include "stm32h7xx_hal_uart.h"
-#include "stm32h7xx_hal_uart_ex.h"
-#include "stm32h7xx_it.h"
 #include "task.h"
-#include "usart.h"
 #include <common.h>
-#include <math.h>
 #include <rs485.h>
-#include <stdint.h>
 #include <strings.h>
 
 osThreadId_t samd_thread;
