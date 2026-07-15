@@ -66,7 +66,7 @@ void ADCS_Routine(void *argument) {
   };
 
   while (1) {
-    osDelay(750);
+    // osDelay(750);
     QTZ_ByteArray_Reset(&buffer);
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 

@@ -4,24 +4,28 @@
 
 // -------- LIBRARIES AND INITIAL VALUES ------------------
 
-//#include "BMI088.h"
-//#include <7Semi_MMC5983MA.h>
+// #include "BMI088.h"
+// #include <7Semi_MMC5983MA.h>
+#include <ArduinoRS485.h>
 #include <Wire.h>
 #include <math.h>
-#include <ArduinoRS485.h>
+
+const int MAX_RETRIES = 3;
+const int ACK_TIMEOUT = 200;
 
 const int TX_ENABLE_PIN = 7; // Connects to DE and RE of the transceiver
 RS485Class rs485(Serial1, TX_ENABLE_PIN, TX_ENABLE_PIN, -1);
 
-constexpr auto baudrate{ 115200 };
+constexpr auto baudrate{115200};
 
-// Calculate preDelay and postDelay in microseconds for stable RS-485 transmission
-constexpr auto bitduration{ 1.f / baudrate };
-constexpr auto wordlen{ 9.6f };  // OR 10.0f depending on the channel configuration
-constexpr auto preDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
-constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
+// Calculate preDelay and postDelay in microseconds for stable RS-485
+// transmission
+constexpr auto bitduration{1.f / baudrate};
+constexpr auto wordlen{9.6f}; // OR 10.0f depending on the channel configuration
+constexpr auto preDelayBR{bitduration * wordlen * 3.5f * 1e6};
+constexpr auto postDelayBR{bitduration * wordlen * 3.5f * 1e6};
 
-//MMC5983MA_7Semi mag;
+// MMC5983MA_7Semi mag;
 
 float
     magVec[3]; // Campo magnetico en el MARCO DEL CUERPO (tras calibrar y rotar)
@@ -43,9 +47,9 @@ const char *COMMANDS[] = {
 };
 
 /* accel object */
-//Bmi088Accel accel(Wire, 0x18);
+// Bmi088Accel accel(Wire, 0x18);
 /* gyro object */
-//Bmi088Gyro gyro(Wire, 0x68);
+// Bmi088Gyro gyro(Wire, 0x68);
 
 // Vectores de REFERENCIA (PROVISIONALES - reemplazar por IGRF y efemerides del
 // Sol). Deben estar en el MISMO marco (p.ej. ECI) y se normalizan dentro de
@@ -121,14 +125,32 @@ void sendRS485(char *msg) {
   Serial.print("Response: ");
   Serial.println(msg);
 
-  rs485.beginTransmission();
-  rs485.print(msg);
-  rs485.endTransmission();
+  int acknowledged = 0;
+  for (int i = 0; i < MAX_TRIES; i++) {
+    rs485.beginTransmission();
+    rs485.print(msg);
+    rs485.endTransmission();
+
+    rs485.receive();
+    time_t target = now() + ACK_TIMEOUT;
+    while (now() < target) {
+      if (rs485.available()) {
+        char ack = rs485.read();
+        Serial.print("Received ACK: ");
+        Serial.println(ack);
+
+        if (ack == 'K') {
+          acknowledged = 1;
+          break;
+        }
+      }
+    }
+  }
 }
 
 // ----- I2C COMUNICATION SETUP AND SENSOR INITIALIZING -----
 void setup() {
-  Serial.begin(9600);    // Serial data BaudRate
+  Serial.begin(9600); // Serial data BaudRate
   delay(100);
 
   rs485.begin(baudrate);

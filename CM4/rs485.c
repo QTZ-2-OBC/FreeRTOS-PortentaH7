@@ -17,11 +17,9 @@ void QTZ_RS485_EndTransmission() {
 
 void QTZ_RS485_BeginReception() {
   HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_RESET);
-  osDelay(100);
 }
 void QTZ_RS485_EndReception() {
   HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
-  osDelay(100);
 }
 
 void QTZ_RS485_EnableRS485(QTZ_Bool enable) {
