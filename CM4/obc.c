@@ -22,7 +22,7 @@ char *QTZ_OBC_ToStr(QTZ_OBC_Module module_id) {
 // errors!
 QTZ_OBC_Result QTZ_OBC_SendCommand(QTZ_OBC_Command cmd,
                                    QTZ_ByteArray *response_buffer) {
-  QTZ_Debug_Log("%s: Command: %c - Pre/Post Delay: %d:%d - Timeouts: %d:%d - "
+  QTZ_Debug_Log("%s: Command: '%c' - Pre/Post Delay: %d:%d - Timeouts: %d:%d - "
                 "Expects: %d\n",
                 QTZ_OBC_ToStr(cmd.module_id), cmd.command_id, cmd.pre_delay,
                 cmd.post_delay, cmd.send_timeout, cmd.recv_timeout,
