@@ -4,12 +4,24 @@
 
 // -------- LIBRARIES AND INITIAL VALUES ------------------
 
-#include "BMI088.h"
-#include <7Semi_MMC5983MA.h>
+//#include "BMI088.h"
+//#include <7Semi_MMC5983MA.h>
 #include <Wire.h>
 #include <math.h>
+#include <ArduinoRS485.h>
 
-MMC5983MA_7Semi mag;
+const int TX_ENABLE_PIN = 7; // Connects to DE and RE of the transceiver
+RS485Class rs485(Serial1, TX_ENABLE_PIN, TX_ENABLE_PIN, -1);
+
+constexpr auto baudrate{ 115200 };
+
+// Calculate preDelay and postDelay in microseconds for stable RS-485 transmission
+constexpr auto bitduration{ 1.f / baudrate };
+constexpr auto wordlen{ 9.6f };  // OR 10.0f depending on the channel configuration
+constexpr auto preDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
+constexpr auto postDelayBR{ bitduration * wordlen * 3.5f * 1e6 };
+
+//MMC5983MA_7Semi mag;
 
 float
     magVec[3]; // Campo magnetico en el MARCO DEL CUERPO (tras calibrar y rotar)
@@ -31,9 +43,9 @@ const char *COMMANDS[] = {
 };
 
 /* accel object */
-Bmi088Accel accel(Wire, 0x18);
+//Bmi088Accel accel(Wire, 0x18);
 /* gyro object */
-Bmi088Gyro gyro(Wire, 0x68);
+//Bmi088Gyro gyro(Wire, 0x68);
 
 // Vectores de REFERENCIA (PROVISIONALES - reemplazar por IGRF y efemerides del
 // Sol). Deben estar en el MISMO marco (p.ej. ECI) y se normalizan dentro de
@@ -106,51 +118,54 @@ void printMenu() {
 }
 
 void sendRS485(char *msg) {
-  digitalWrite(TX_ENABLE_PIN, HIGH);
-  Serial1.print(msg);
-  Serial1.flush();
-  digitalWrite(TX_ENABLE_PIN, LOW);
-}
+  Serial.print("Response: ");
+  Serial.println(msg);
 
-const int TX_ENABLE_PIN = 7; // Connects to DE and RE of the transceiver
+  rs485.beginTransmission();
+  rs485.print(msg);
+  rs485.endTransmission();
+}
 
 // ----- I2C COMUNICATION SETUP AND SENSOR INITIALIZING -----
 void setup() {
   Serial.begin(9600);    // Serial data BaudRate
-  Serial1.begin(115200); // RS485 serial
   delay(100);
 
+  rs485.begin(baudrate);
+  rs485.setDelays(preDelayBR, postDelayBR);
+  rs485.receive();
+
   int status;
-  /* USB Serial to print data */
-  while (!Serial) {
+  // USB Serial to print data. Bounded wait: if no USB host is attached
+  // (e.g. running standalone on battery/carrier power), Serial never
+  // becomes truthy and this used to hang forever before the board could
+  // ever reach loop() and service RS485 commands.
+  unsigned long serialWaitStart = millis();
+  while (!Serial && millis() - serialWaitStart < 3000) {
   }
   /* start the sensors */
-  status = accel.begin();
-  if (status < 0) {
-    Serial.println("Accel Initialization Error");
-    Serial.println(status);
-    while (1) {
-    }
-  }
-  status = gyro.begin();
-  if (status < 0) {
-    Serial.println("Gyro Initialization Error");
-    Serial.println(status);
-    while (1) {
-    }
-  }
+  // status = accel.begin();
+  // if (status < 0) {
+  //   Serial.println("Accel Initialization Error");
+  //   Serial.println(status);
+  //   while (1) {
+  //   }
+  // }
+  // status = gyro.begin();
+  // if (status < 0) {
+  //   Serial.println("Gyro Initialization Error");
+  //   Serial.println(status);
+  //   while (1) {
+  //   }
+  // }
 
-  if (!mag.beginI2C(Wire, 0x30)) {
-    Serial.println("MMC5983MA not found on I2C");
-    while (1)
-      delay(10);
-  }
+  // if (!mag.beginI2C(Wire, 0x30)) {
+  //   Serial.println("MMC5983MA not found on I2C");
+  //   while (1)
+  //     delay(10);
+  // }
 
-  mag.enableAutoSetReset(true, MMC5983MA_7Semi::MES_100);
-
-  // RS485 communication
-  pinMode(TX_ENABLE_PIN, OUTPUT);
-  digitalWrite(TX_ENABLE_PIN, LOW); // Start in Receive Mode
+  // mag.enableAutoSetReset(true, MMC5983MA_7Semi::MES_100);
 
   delay(2000);
   printMenu();
@@ -160,11 +175,11 @@ void setup() {
 
 // -------------------------- MAIN LOOP ----------------------------
 void loop() {
-  if (!Serial1.available()) {
+  if (!rs485.available()) {
     return;
   }
-  char input = Serial1.read();
-  Serial.print("Received command: ");
+  char input = rs485.read();
+  Serial.print("Received: ");
   Serial.println(input);
 
   // Search through available commands...
@@ -183,18 +198,18 @@ void loop() {
   }
 
   switch (input) {
-  case "p": {
+  case 'p': {
     sendRS485("0PING");
   } break;
-  case "a": {
+  case 'a': {
     // TODO: Wake up module...
     sendRS485("0AWAKE");
   } break;
-  case "s": {
+  case 's': {
     // TODO: Sleep module...
     sendRS485("0SLEEP");
   } break;
-  case "g": {
+  case 'g': {
     // Tras esta llamada, magVec queda en el MARCO DEL CUERPO, listo para TRIAD
     readmag(magVec[0], magVec[1], magVec[2], 2);
     readIMU();
@@ -203,7 +218,7 @@ void loop() {
     // TODO: Send bytes read from sensor...
     sendRS485("0BYTES");
   } break;
-  case "r": {
+  case 'r': {
     // TODO: Reset microcontroller...
     sendRS485("0DONE");
   } break;
@@ -223,16 +238,16 @@ void loop() {
 void readIMU() {
 
   // Initial reading on both sensors
-  accel.readSensor();
-  gyro.readSensor();
+  // accel.readSensor();
+  // gyro.readSensor();
 
-  // accelVec[0] = accel.getAccelX_mss();
-  // accelVec[1] = accel.getAccelY_mss();
-  // accelVec[2] = accel.getAccelZ_mss();
+  // // accelVec[0] = accel.getAccelX_mss();
+  // // accelVec[1] = accel.getAccelY_mss();
+  // // accelVec[2] = accel.getAccelZ_mss();
 
-  gyroVec[0] = gyro.getGyroX_rads();
-  gyroVec[1] = gyro.getGyroY_rads();
-  gyroVec[2] = gyro.getGyroZ_rads();
+  // gyroVec[0] = gyro.getGyroX_rads();
+  // gyroVec[1] = gyro.getGyroY_rads();
+  // gyroVec[2] = gyro.getGyroZ_rads();
 
   // print the data (CORREGIDO: antes leia el indice [3], fuera de rango)
   Serial.print("Acc: ");
@@ -249,79 +264,79 @@ void readIMU() {
   Serial.print("\t");
   Serial.print(gyroVec[2]);
   Serial.print("\t");
-  Serial.print(accel.getTemperature_C());
+  // Serial.print(accel.getTemperature_C());
   Serial.print("\n");
 }
 
 // --------------------- LECTURA DEL MAGNETOMETRO ----------------------
 void readmag(float &x_cal, float &y_cal, float &z_cal, int mode) {
-  switch (mode) {
-  case 1:
-    if (mag.readMagnetometer(x, y, z)) {
+  // switch (mode) {
+  // case 1:
+  //   if (mag.readMagnetometer(x, y, z)) {
 
-      /**  MAGNETOMETER CALIBRATION MODE (raw para MATLAB) */
-      Serial.print(x);
-      Serial.print(",");
-      Serial.print(y);
-      Serial.print(",");
-      Serial.println(z);
+  //     /**  MAGNETOMETER CALIBRATION MODE (raw para MATLAB) */
+  //     Serial.print(x);
+  //     Serial.print(",");
+  //     Serial.print(y);
+  //     Serial.print(",");
+  //     Serial.println(z);
 
-    } else {
-      Serial.println("Mag read failed");
-    }
+  //   } else {
+  //     Serial.println("Mag read failed");
+  //   }
 
-    break;
+  //   break;
 
-  case 2:
-    if (mag.readMagnetometer(x, y, z)) {
+  // case 2:
+  //   if (mag.readMagnetometer(x, y, z)) {
 
-      /**  CALIBRATED MODE + ROTACION A MARCO DEL CUERPO **/
+  //     /**  CALIBRATED MODE + ROTACION A MARCO DEL CUERPO **/
 
-      // 1) Calibracion: restar offsets EN EL MARCO DEL SENSOR
-      float mag_sensor[3];
-      mag_sensor[0] = x - mag_offset[0];
-      mag_sensor[1] = y - mag_offset[1];
-      mag_sensor[2] = z - mag_offset[2];
+  //     // 1) Calibracion: restar offsets EN EL MARCO DEL SENSOR
+  //     float mag_sensor[3];
+  //     mag_sensor[0] = x - mag_offset[0];
+  //     mag_sensor[1] = y - mag_offset[1];
+  //     mag_sensor[2] = z - mag_offset[2];
 
-      // 2) Rotar del marco SENSOR al marco del CUERPO
-      float mag_body[3];
-      applyRotation(R_mag, mag_sensor, mag_body);
+  //     // 2) Rotar del marco SENSOR al marco del CUERPO
+  //     float mag_body[3];
+  //     applyRotation(R_mag, mag_sensor, mag_body);
 
-      // 3) Escribir el resultado (marco cuerpo) en las referencias = magVec
-      x_cal = mag_body[0];
-      y_cal = mag_body[1];
-      z_cal = mag_body[2];
+  //     // 3) Escribir el resultado (marco cuerpo) en las referencias = magVec
+  //     x_cal = mag_body[0];
+  //     y_cal = mag_body[1];
+  //     z_cal = mag_body[2];
 
-      // |B| es invariante ante la rotacion
-      float B_total = sqrt(x_cal * x_cal + y_cal * y_cal + z_cal * z_cal);
+  //     // |B| es invariante ante la rotacion
+  //     float B_total = sqrt(x_cal * x_cal + y_cal * y_cal + z_cal * z_cal);
 
-      Serial.print("Body mG: ");
-      Serial.print(x_cal, 2);
-      Serial.print(", ");
-      Serial.print(y_cal, 2);
-      Serial.print(", ");
-      Serial.print(z_cal, 2);
-      Serial.print(" | |B|: ");
-      Serial.print(B_total, 2);
-      Serial.println(" mG");
+  //     Serial.print("Body mG: ");
+  //     Serial.print(x_cal, 2);
+  //     Serial.print(", ");
+  //     Serial.print(y_cal, 2);
+  //     Serial.print(", ");
+  //     Serial.print(z_cal, 2);
+  //     Serial.print(" | |B|: ");
+  //     Serial.print(B_total, 2);
+  //     Serial.println(" mG");
 
-    } else {
-      Serial.println("Mag read failed");
-    }
+  //   } else {
+  //     Serial.println("Mag read failed");
+  //   }
 
-    break;
+  //   break;
 
-  default:
-    break;
-  }
+  // default:
+  //   break;
+  // }
 }
 
 // ---------------------- LECTURA DE FOTODIODOS ---------------------------
 // Valores inventados en pines.
 void readPhotodiodesRaw() {
-  const int pdPin[6] = {A0, A1, A2, A3, A6, A7}; // Cambiar esto
-  for (int i = 0; i < 6; i++)
-    pdRaw[i] = analogRead(pdPin[i]);
+  // const int pdPin[6] = {A0, A1, A2, A3, A6, A7}; // Cambiar esto
+  // for (int i = 0; i < 6; i++)
+  //   pdRaw[i] = analogRead(pdPin[i]);
 }
 
 // para calibrar offsets y picos
