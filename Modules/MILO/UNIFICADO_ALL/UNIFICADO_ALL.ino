@@ -9,8 +9,8 @@ const int OPENMV_RESET_PIN = 3;
 const bool MODEL_ENABLED = false;
 const size_t MAX_LOOP_ITERS = 25000;
 
-char str[16] = "Estoy vivo\n"; //Prueba de cadena de envío 
-const int csPin = 2; //Pin selector de esclavo. 
+char str[16] = "Estoy vivo\n"; //Prueba de cadena de envío
+const int csPin = 2; //Pin selector de esclavo.
 
 const int TX_ENABLE_PIN = 4;  // Connects to DE and RE of the transceiver
 
@@ -21,10 +21,10 @@ void setup() {
 
   pinMode(csPin, OUTPUT);
   digitalWrite(csPin, HIGH);
-  
-  //Configuración de comunicación SPI 
+
+  //Configuración de comunicación SPI
   SPI.begin();
-  SPI.setClockDivider(SPI_CLOCK_DIV8); 
+  SPI.setClockDivider(SPI_CLOCK_DIV8);
   Serial.println("Hola, soy SPI Mega_Master");
 
   pinMode(OPENMV_RESET_PIN, OUTPUT);
@@ -76,16 +76,16 @@ void sendCommand(char cmd) {
 
   char i2c_response[64] = {};
   Wire.requestFrom((uint8_t)OPENMV_ADDR, (uint8_t)64);
-  
+
   for (int i = 0; i < 64; i++) {
-    if (Wire.available()) { 
+    if (Wire.available()) {
       char c = Wire.read();
-      if (c != 0 && c != 255 && c != '\n') { 
+      if (c != 0 && c != 255 && c != '\n') {
         i2c_response[i] = c;
       }
     }
   }
-  
+
   Serial.print("Respuesta I2C: '");
   Serial.print(i2c_response);
   Serial.println("'");
@@ -95,36 +95,62 @@ void sendCommand(char cmd) {
   Serial1.flush();
   digitalWrite(TX_ENABLE_PIN, LOW);
 
-  // Comando R para activar el Envío de la imagen por SPI 
-  // if(cmd == 'R' && i2c_response.indexOf("SPI_READY") >= 0) {
-    
-  //   Serial.println("Iniciando comunicacion SPI...");
-  //   delay(100); 
-  //   char datos_recibidos[17]; // 16 bytes + caracter nulo para imprimir
-    
-  //   // Configuración para SPI 
-  //   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));//cambio a 250000
+  /*
+  //---------------------------------------------------------------------
+  //------------------Logica para transmisión de Imagen -----------------
+  //---------------------------------------------------------------------
 
-  //   digitalWrite(csPin, LOW); 
-  //   delay(5); // Pequeño delay de estabilización
-    
-  //   // Transferencia SPI bidireccional (Enviamos 16, recibimos 16)
-  //   for (int i = 0; i < 16; i++) {
-  //     datos_recibidos[i] = SPI.transfer(str[i]);
-  //   }
-  //   datos_recibidos[16] = '\0'; // Terminador nulo para evitar basura en Serial.print
-    
-  //   digitalWrite(csPin, HIGH); 
-  //   SPI.endTransaction();
-    
-  //   Serial.print("Recibido via SPI (Tamano Imagen): ");
-  //   Serial.println(datos_recibidos);
-    
-  //   delay(2000); // Retraso antes de la siguiente petición
-  // } 
-  // else if (cmd == 'R') {
-  //   Serial.println("Error: OpenMV no envio SPI_READY");
-  // }
+    if (cmd == 'S' && strncmp(i2c_response, "SIZE:", 5) == 0) {
+      int total_size = 0;
+      int total_pkts = 0;
+
+      // Extraemos los valores de la respuesta
+      sscanf(i2c_response, "SIZE:%d,PKTS:%d", &total_size, &total_pkts);
+
+      Serial.print("Iniciando descarga SPI. Paquetes a leer: ");
+      Serial.println(total_pkts);
+
+      SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+
+      uint8_t buffer_spi[1024];
+      int bytes_recibidos = 0;
+
+      // Le damos a la OpenMV un momento para preparar cada paquete
+      delay(50);
+
+      for (int p = 0; p < total_pkts; p++) {
+        digitalWrite(csPin, LOW);
+
+        for (int i = 0; i < 1024; i++) {
+          buffer_spi[i] = SPI.transfer(0x00);
+        }
+
+        digitalWrite(csPin, HIGH);
+
+        // --- GUARDAS EL PAQUETE ---
+
+        Serial.print("Paquete ");
+
+        // Esto solo para ver que los datos recibidos no sean basura y poder depurar
+        for (int i = 0; i < 1024; i++){
+          Serial.print(buffer_spi[i]);
+          Serial.print(" ");
+        }
+        //-------------------------------------------------------------------
+
+
+        Serial.println();
+        Serial.print(p + 1);
+        Serial.println(" recibido.");
+
+        // Tiempo para preparar el siguiente paquete
+        delay(50);
+      }
+
+      SPI.endTransaction();
+      Serial.println("Imagen descargada completamente.");
+    }
+    */
 }
 
 void loop() {

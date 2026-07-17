@@ -4,6 +4,7 @@ import ml
 import uos
 import gc
 from pyb import I2C
+from pyb import SPI, Pin
 
 OK_STATUS = "0"
 
@@ -17,6 +18,9 @@ def init_sensor():
 
 
 init_sensor()
+
+spi = SPI(2, SPI.SLAVE, baudrate=1000000, polarity=0, phase=0)
+print("Esperando datos SPI...")
 
 def minimize_label(label: str) -> str:
     if label == "Cloudy_Medium":
@@ -55,6 +59,10 @@ best_label = "None"
 best_score = 0.0
 detected_flag = 0
 saved_flag = 0
+
+#variables para SPI
+receive_buffer = bytearray(1024)
+send_buffer = bytearray(1024)
 
 clock = time.clock()
 
@@ -162,11 +170,48 @@ while True:
 
             # -------- CAPTURA --------
             elif cmd == 'S':
+                # 1. Tomar y comprimir la imagen
                 img = sensor.snapshot()
-                filename = "images/%s_manual.jpg" % time.strftime("%Y_%m_%d_%H_%M_%S", time.gmtime())
-                img.save(filename, quality=85)
-                gc.collect()
-                response = "CAPTURE SAVED"
+                img_jpeg = img.compress(quality=50)
+                datos_jpeg = img_jpeg.bytearray()
+
+                total_size = len(datos_jpeg)
+                paquete_size = 1024
+                # Calculo del total de paquetes
+                total_pkts = (total_size + paquete_size - 1) // paquete_size
+
+                print("Tamaño JPEG:", total_size, "bytes en", total_pkts, "paquetes")
+
+                # Enviar la cantidad de paquetes que se van a enviar
+                response = "SIZE:%d,PKTS:%d" % (total_size, total_pkts)
+                try:
+                    i2c.send(response + "\n")
+                except:
+                    pass
+
+                # Enviar paquete por paquete por SPI
+                for i in range(total_pkts):
+                    inicio = i * paquete_size
+                    fin = inicio + paquete_size
+                    fragmento = datos_jpeg[inicio:fin]
+
+                    # Si es el último paquete es menor a 1024 rellenar con ceros
+                    if len(fragmento) < paquete_size:
+                        fragmento += bytearray(paquete_size - len(fragmento))
+
+                    print("Esperando reloj del Maestro para paquete", i + 1)
+                    try:
+                        # Mandamos el fragmento por SPI
+                        # si el maestro falla.
+                        spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
+                    except Exception as e:
+                        print("Error enviando paquete SPI:", e)
+                        break
+
+                print("Transmisión de imagen finalizada.")
+
+                # Se vacia la respuesta para evitar enviar datos por I2C luego del bucle.
+                response = ""
 
             # ------ FUNCIONES EXTRAS -------
             elif cmd == 'B':
