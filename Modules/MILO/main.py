@@ -2,7 +2,9 @@ import sensor
 import time
 import ml
 import uos
+import os
 import gc
+import image
 from pyb import I2C
 from pyb import SPI, Pin
 
@@ -168,12 +170,27 @@ while True:
                 gc.collect()
                 response = "MODELS OFF"
 
+            # -------- EXTRACCIÓN DE IMAGEN-----
+            elif cmd == 'L':
+            # Desplegar listado de imagenes
+            #
+            # Pedir ingreso nombre de la imagen requerida
+            # Activar SPI
+            # Empaquetar
+            # Enviar por SPI
+
             # -------- CAPTURA --------
             elif cmd == 'S':
-                # 1. Tomar y comprimir la imagen
+                #Tomar y comprimir la imagen
                 img = sensor.snapshot()
+                # ----- Guardado de imagen ------------
+                filename = "imagen %d.jpg" % time.ticks_ms() #Nombrar de forma adecuada
+                img.save(filename,quality = 100)
+                gc.collect()
+                #--------------------------------------
                 img_jpeg = img.compress(quality=50)
                 datos_jpeg = img_jpeg.bytearray()
+
 
                 total_size = len(datos_jpeg)
                 paquete_size = 1024
@@ -195,14 +212,13 @@ while True:
                     fin = inicio + paquete_size
                     fragmento = datos_jpeg[inicio:fin]
 
-                    # Si es el último paquete es menor a 1024 rellenar con ceros
+                    # Rellenar con ceros los paquetes que no logran el largo deseado
                     if len(fragmento) < paquete_size:
                         fragmento += bytearray(paquete_size - len(fragmento))
 
                     print("Esperando reloj del Maestro para paquete", i + 1)
                     try:
                         # Mandamos el fragmento por SPI
-                        # si el maestro falla.
                         spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
                     except Exception as e:
                         print("Error enviando paquete SPI:", e)
