@@ -29,7 +29,7 @@ osThreadId_t adcs_thread;
 const osThreadAttr_t adcs_thread_attributes = {
     .name = "adcs_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 256 * 8,
+    .stack_size = 1024 * 3,
 };
 
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
