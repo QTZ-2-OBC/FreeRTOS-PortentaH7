@@ -9,10 +9,12 @@
 #include "adcs.h"
 #include "cmsis_os2.h"
 #include "debug.h"
+#include "i2c.h"
 #include "main.h"
 #include "milo.h"
 #include "obc.h"
 #include "portable.h"
+#include "stm32h7xx_hal_i2c.h"
 #include "task.h"
 #include <common.h>
 #include <rs485.h>
@@ -22,14 +24,21 @@ osThreadId_t milo_thread;
 const osThreadAttr_t milo_thread_attributes = {
     .name = "milo_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 256 * 8,
+    .stack_size = 1024 * 2,
 };
 
 osThreadId_t adcs_thread;
 const osThreadAttr_t adcs_thread_attributes = {
     .name = "adcs_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 1024 * 3,
+    .stack_size = 1024 * 2,
+};
+
+osThreadId_t i2c_thread;
+const osThreadAttr_t i2c_thread_attributes = {
+    .name = "i2c_task",
+    .priority = (osPriority_t)osPriorityNormal,
+    .stack_size = 1024 * 2,
 };
 
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
@@ -37,6 +46,35 @@ const osThreadAttr_t adcs_thread_attributes = {
 void PrintAvailableHeap() {
   size_t free_heap = xPortGetFreeHeapSize();
   QTZ_Debug_Log("Available HEAP SIZE: %d\n", free_heap);
+}
+
+void I2C_Routine(void *argument) {
+  (void)(argument);
+  // NOTE: Initialize the LED pin on blue.
+  GPIO_InitTypeDef GPIO_InitStructure;
+  GPIO_InitStructure.Pin = LED_B_Pin;
+  GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_B_GPIO_Port, &GPIO_InitStructure);
+  HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);
+
+  QTZ_ByteArray_Create(buffer, data, 64);
+  while (1) {
+    osDelay(750);
+    QTZ_ByteArray_Reset(&buffer);
+    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+
+    const int msg_length = 5;
+    HAL_StatusTypeDef status =
+        HAL_I2C_Slave_Receive(&hi2c1, buffer.data, msg_length, 10000);
+    if (status != HAL_OK) {
+      QTZ_Debug_Error("Failed to obtain data from I2C: %d", status);
+      Error_Handler();
+    }
+
+    buffer.length += msg_length;
+    QTZ_Debug_Log("DATA: %.*s", buffer.data, buffer.length);
+  }
 }
 
 void ADCS_Routine(void *argument) {
@@ -180,5 +218,6 @@ void MILO_Routine(void *argument) {
 
 void MX_FREERTOS_Init(void) {
   // milo_thread = osThreadNew(MILO_Routine, NULL, &milo_thread_attributes);
-  adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
+  // adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
+  i2c_thread = osThreadNew(I2C_Routine, NULL, &i2c_thread_attributes);
 }
