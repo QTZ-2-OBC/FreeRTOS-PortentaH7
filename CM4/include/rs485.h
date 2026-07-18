@@ -18,8 +18,10 @@
 // UART Base handle to use for the UART protocol
 #define QTZ_RS485_UART_HANDLE &huart4
 
-#define QTZ_RS485_PRE_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
-#define QTZ_RS485_POST_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
+// #define QTZ_RS485_PRE_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
+// #define QTZ_RS485_POST_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
+#define QTZ_RS485_PRE_DELAY 5
+#define QTZ_RS485_POST_DELAY 5
 
 // Initialize the GPIO pins for RS485 transmission.
 void QTZ_RS485_InitGPIO();

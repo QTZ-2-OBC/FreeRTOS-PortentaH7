@@ -11,7 +11,7 @@
 #include <math.h>
 
 const int MAX_RETRIES = 3;
-const int ACK_TIMEOUT = 250;
+const int ACK_TIMEOUT = 50;
 
 const int TX_ENABLE_PIN = 7; // Connects to DE and RE of the transceiver
 RS485Class rs485(Serial1, TX_ENABLE_PIN, TX_ENABLE_PIN, -1);
