@@ -126,14 +126,14 @@ void sendRS485(char *msg) {
   Serial.println(msg);
 
   int acknowledged = 0;
-  for (int i = 0; i < MAX_TRIES; i++) {
+  for (int i = 0; i < MAX_RETRIES; i++) {
     rs485.beginTransmission();
     rs485.print(msg);
     rs485.endTransmission();
 
     rs485.receive();
-    time_t target = now() + ACK_TIMEOUT;
-    while (now() < target) {
+    time_t target = millis() + ACK_TIMEOUT;
+    while (millis() < target) {
       if (rs485.available()) {
         char ack = rs485.read();
         Serial.print("Received ACK: ");
@@ -145,6 +145,15 @@ void sendRS485(char *msg) {
         }
       }
     }
+
+    if (acknowledged) {
+      break;
+    }
+    Serial.println("Didn't receive any acknowledgement from PortentaH7! Retrying...");
+  }
+
+  if (!acknowledged) {
+    Serial.println("No response received! Failed to send respone...");
   }
 }
 

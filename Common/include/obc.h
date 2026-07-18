@@ -2,6 +2,11 @@
 #define QTZ_LIB_OBC
 #include "common.h"
 
+// This constant is used to acknowledge when a command response is received.
+//
+// IT'S IMPORTANT THAT IS ONLY ONE BYTE LONG!
+#define QTZ_OBC_ACK "K"
+
 typedef enum {
   QTZ_OBC_MODULE_MILO,
   QTZ_OBC_MODULE_ADCS,
