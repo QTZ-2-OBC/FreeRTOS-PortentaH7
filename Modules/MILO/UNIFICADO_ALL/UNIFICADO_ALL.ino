@@ -95,7 +95,7 @@ void sendCommand(char cmd) {
   Serial1.flush();
   digitalWrite(TX_ENABLE_PIN, LOW);
 
-  /*
+
   //---------------------------------------------------------------------
   //------------------Logica para transmisión de Imagen -----------------
   //---------------------------------------------------------------------
@@ -127,7 +127,9 @@ void sendCommand(char cmd) {
 
         digitalWrite(csPin, HIGH);
 
-        // --- GUARDAS EL PAQUETE ---
+        // -------------------------------
+        //Logia para reconstruir la imagen
+        // -------------------------------
 
         Serial.print("Paquete ");
 
@@ -150,7 +152,6 @@ void sendCommand(char cmd) {
       SPI.endTransaction();
       Serial.println("Imagen descargada completamente.");
     }
-    */
 }
 
 void loop() {
@@ -160,10 +161,10 @@ void loop() {
     delay(500);
   }
 
-  if (!Serial1.available()) {
+  if (!Serial.available()) {
     return;
   }
-  char input = Serial1.read();
+  char input = Serial.read();
 
   Serial.print("Received command: ");
   Serial.println(input);

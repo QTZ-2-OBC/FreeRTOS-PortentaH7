@@ -5,6 +5,7 @@ import uos
 import os
 import gc
 import image
+import pyb
 from pyb import I2C
 from pyb import SPI, Pin
 
@@ -172,25 +173,36 @@ while True:
 
             # -------- EXTRACCIÓN DE IMAGEN-----
             elif cmd == 'L':
-            # Desplegar listado de imagenes
-            #
-            # Pedir ingreso nombre de la imagen requerida
-            # Activar SPI
-            # Empaquetar
-            # Enviar por SPI
+                # Desplegar listado de imagenes
+                direct = "images"
+                archivos = os.listdir(direct)
+
+                for archivo in archivos:
+                    if archivo.endswith(".jpg") or archivo.endswith(".jpeg"):
+                        print("Encontrado:", archivo)
+                        #img = image.Image(direct + archivo)
+                        #print(img.compressed_for_ide(),end="")
+                # Pedir ingreso nombre de la imagen requerida
+                # Activar SPI
+                # Empaquetar
+                # Enviar por SPI
 
             # -------- CAPTURA --------
             elif cmd == 'S':
                 #Tomar y comprimir la imagen
                 img = sensor.snapshot()
                 # ----- Guardado de imagen ------------
-                filename = "imagen %d.jpg" % time.ticks_ms() #Nombrar de forma adecuada
-                img.save(filename,quality = 100)
+                rtc = pyb.RTC()
+                fecha_hora = rtc.datetime()
+                nombre = "images/capture_%d%d%d_%d%d%d.jpg" % (fecha_hora[0], fecha_hora[1], fecha_hora[2], fecha_hora[4], fecha_hora[5], fecha_hora[6])
+                #img.save(nombre)
+                #filename = "images/cp%d.jpg" % time.ticks_ms() #Nombrar de forma adecuada
+                img.save(nombre,quality = 100)
                 gc.collect()
+                print("Guardada:", nombre)
                 #--------------------------------------
                 img_jpeg = img.compress(quality=50)
                 datos_jpeg = img_jpeg.bytearray()
-
 
                 total_size = len(datos_jpeg)
                 paquete_size = 1024

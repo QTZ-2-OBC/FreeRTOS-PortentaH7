@@ -27,8 +27,7 @@ constexpr auto postDelayBR{bitduration * wordlen * 3.5f * 1e6};
 
 // MMC5983MA_7Semi mag;
 
-float
-    magVec[3]; // Campo magnetico en el MARCO DEL CUERPO (tras calibrar y rotar)
+float magVec[3]; // Campo magnetico en el MARCO DEL CUERPO (tras calibrar y rotar)
 float accelVec[3];
 float gyroVec[3];
 
