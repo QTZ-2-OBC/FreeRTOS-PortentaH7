@@ -11,7 +11,7 @@
 #include <math.h>
 
 const int MAX_RETRIES = 3;
-const int ACK_TIMEOUT = 200;
+const int ACK_TIMEOUT = 50;
 
 const int TX_ENABLE_PIN = 7; // Connects to DE and RE of the transceiver
 RS485Class rs485(Serial1, TX_ENABLE_PIN, TX_ENABLE_PIN, -1);
@@ -125,14 +125,13 @@ void sendRS485(char *msg) {
   Serial.println(msg);
 
   int acknowledged = 0;
-  for (int i = 0; i < MAX_TRIES; i++) {
+  for (int i = 0; i < MAX_RETRIES; i++) {
     rs485.beginTransmission();
     rs485.print(msg);
     rs485.endTransmission();
 
-    rs485.receive();
-    time_t target = now() + ACK_TIMEOUT;
-    while (now() < target) {
+    unsigned long target = millis() + ACK_TIMEOUT;
+    while (millis() <= target) {
       if (rs485.available()) {
         char ack = rs485.read();
         Serial.print("Received ACK: ");
@@ -144,6 +143,15 @@ void sendRS485(char *msg) {
         }
       }
     }
+
+    if (acknowledged) {
+      break;
+    }
+    Serial.println("Didn't receive any acknowledgement from PortentaH7! Retrying...");
+  }
+
+  if (!acknowledged) {
+    Serial.println("No response received! Failed to send respone...");
   }
 }
 
