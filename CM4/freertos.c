@@ -60,19 +60,21 @@ void I2C_Routine(void *argument) {
 
   QTZ_ByteArray_Create(buffer, data, 64);
   while (1) {
-    osDelay(750);
+    // osDelay(750);
     QTZ_ByteArray_Reset(&buffer);
-    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+    // HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
-    const int msg_length = 5;
+    const int msg_length = 1;
     HAL_StatusTypeDef status =
-        HAL_I2C_Slave_Receive(&hi2c1, buffer.data, msg_length, 10000);
+        HAL_I2C_Slave_Receive(&hi2c1, buffer.data, msg_length, 2000);
     if (status != HAL_OK) {
       QTZ_Debug_Error("Failed to obtain data from I2C: %d", status);
-      Error_Handler();
+      // Error_Handler();
     }
-
     buffer.length += msg_length;
+
+    HAL_I2C_Slave_Transmit(&hi2c1, buffer.data, msg_length, 2000);
+
     QTZ_Debug_Log("DATA: %.*s", buffer.data, buffer.length);
   }
 }
