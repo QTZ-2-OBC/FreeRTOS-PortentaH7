@@ -29,7 +29,7 @@ int main(void) {
   QTZ_Debug_Init();
   QTZ_RS485_InitGPIO();
   // MX_LPUART1_UART_Init();
-  MX_I2C1_Init();
+  MX_I2C1_Init(); // I2C1 slave — A3200<->Portenta handover prototype
   MX_FREERTOS_Init();
   /* Start scheduler */
   osKernelStart();
