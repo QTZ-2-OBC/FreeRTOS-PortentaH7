@@ -3,6 +3,17 @@
 // I2C handover prototype. Happy-path only: every command that the A3200's
 // handover.c actually sends gets a correct, immediate response; the bench
 // stub's failure-injection test modes are not ported (see handover_slave.h).
+//
+// Response computation happens SYNCHRONOUSLY in ISR context
+// (ho_process_command_isr(), called from HAL_I2C_SlaveRxCpltCallback) —
+// NOT deferred to HandoverSlave_Routine as originally designed. Confirmed
+// on real hardware: the deferred-task approach raced against the master's
+// repeated-START into the read phase and lost, even with the handover task
+// at osPriorityAboveNormal (above adcs_thread) — A3200 received a stale
+// ho_tx_buf[0] value left over from the previous command instead of the
+// real response (PREPARE's ACK was spurious; ho_state never actually left
+// IDLE). HandoverSlave_Routine now only logs what ho_process_command_isr()
+// already decided — see that function's doc comment for the full story.
 
 #include "handover_slave.h"
 
@@ -91,11 +102,131 @@ static uint8_t ho_tx_resp_len(uint8_t cmd) {
   }
 }
 
+/* ── Synchronous command processing (ISR context) ─────────────────────────
+ * CONFIRMED ON REAL HARDWARE: computing the response in the deferred task
+ * (HandoverSlave_Routine) — even at osPriorityAboveNormal, already above
+ * adcs_thread — is NOT fast enough. The master's repeated-START into the
+ * read phase can happen before the task ever gets to run, so
+ * HAL_I2C_AddrCallback's read-phase branch clocks out whatever was left in
+ * ho_tx_buf[0] from the PREVIOUS command, not the real response to the
+ * current one. Bench evidence: PING/STATUS_REQ (0 argument bytes) always
+ * worked; PREPARE (1 argument byte) never did — A3200 saw a stale ACK
+ * left over from the prior PING, while ho_state never actually left IDLE
+ * (proven by STATUS_REQ returning NACK three times afterward).
+ *
+ * Fix: compute the state transition and response byte HERE, synchronously,
+ * in ISR context, the instant the full command (cmd + all its argument
+ * bytes) has been received — guaranteed to complete before the read-phase
+ * AddrCallback can possibly fire. Only logging is deferred to
+ * HandoverSlave_Routine (not time-critical, and QTZ_Debug_Log's ISR-safety
+ * isn't confirmed) — it re-derives what happened from ho_rx_buf/ho_tx_buf/
+ * ho_state, which are already fully decided by the time it wakes.
+ *
+ * Must stay ISR-safe: plain variable reads/writes only, no blocking calls,
+ * no logging. */
+static void ho_process_command_isr(void) {
+  uint8_t cmd = ho_rx_buf[0];
+  uint8_t subcmd = (ho_rx_have_len > 1U) ? ho_rx_buf[1] : 0U;
+
+  switch (cmd) {
+  case HO_PROTO_CMD_PING:
+    ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    break;
+
+  case HO_PROTO_CMD_STATUS_REQ:
+    switch (ho_state) {
+    case HO_SLAVE_STATE_PREPARING:
+      ho_tx_buf[0] = HO_PROTO_RESP_READY;
+      break;
+    case HO_SLAVE_STATE_ACTIVE:
+      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+      break;
+    case HO_SLAVE_STATE_IDLE:
+    default:
+      ho_tx_buf[0] = HO_PROTO_RESP_NACK;
+      break;
+    }
+    break;
+
+  case HO_PROTO_CMD_PREPARE:
+    if (ho_state != HO_SLAVE_STATE_IDLE) {
+      ho_tx_buf[0] = HO_PROTO_RESP_BUSY;
+    } else {
+      ho_active_subsystems = subcmd;
+      ho_state = HO_SLAVE_STATE_PREPARING;
+      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    }
+    break;
+
+  case HO_PROTO_CMD_START:
+    if (ho_state != HO_SLAVE_STATE_PREPARING) {
+      ho_tx_buf[0] = HO_PROTO_RESP_NACK;
+    } else {
+      ho_active_subsystems = subcmd;
+      ho_state = HO_SLAVE_STATE_ACTIVE;
+      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    }
+    break;
+
+  case HO_PROTO_CMD_ABORT:
+    ho_active_subsystems = HO_PROTO_SUBSYS_NONE;
+    ho_state = HO_SLAVE_STATE_IDLE;
+    ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    break;
+
+  case HO_PROTO_CMD_HEARTBEAT_REQ:
+    if (ho_lora_tx_pending && ho_state == HO_SLAVE_STATE_ACTIVE) {
+      ho_tx_buf[0] = HO_PROTO_RESP_HEARTBEAT_LORA_PENDING;
+    } else {
+      ho_tx_buf[0] = HO_PROTO_RESP_HEARTBEAT;
+    }
+    break;
+
+  case HO_PROTO_CMD_LORA_GRANT:
+    ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    if (subcmd == HO_PROTO_RESP_LORA_APPROVED) {
+      ho_lora_tx_pending = false;
+    }
+    /* DENIED (or anything else): leave ho_lora_tx_pending as-is so the
+     * next heartbeat naturally asks again. */
+    break;
+
+  case HO_PROTO_CMD_PAYLOAD_RELAY:
+    ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    break;
+
+  case HO_PROTO_CMD_RELAY_POLL:
+    if (ho_relay_queued) {
+      ho_tx_buf[0] = HO_PROTO_RESP_RELAY_PENDING;
+      ho_tx_buf[1] = ho_relay_subsys;
+      ho_tx_buf[2] = ho_relay_cmd_id;
+      ho_tx_buf[3] = ho_relay_param0;
+      ho_tx_buf[4] = ho_relay_param1;
+      ho_relay_queued = false; /* consumed — single-slot queue */
+    } else {
+      ho_tx_buf[0] = HO_PROTO_RESP_NACK;
+      ho_tx_buf[1] = ho_tx_buf[2] = ho_tx_buf[3] = ho_tx_buf[4] = 0U;
+    }
+    break;
+
+  case HO_PROTO_CMD_RELAY_RESULT:
+    ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+    break;
+
+  default:
+    ho_tx_buf[0] = HO_PROTO_RESP_NACK;
+    break;
+  }
+}
+
 /* ── HAL I2C slave ISR callbacks ──────────────────────────────────────────
- * ISR does the minimum possible work (frame the next HAL transfer, or hand
- * off to the task); all command decoding and state-machine logic lives in
- * HandoverSlave_Routine() below. This mirrors the proven bench stub's
- * on_receive/on_request split, adapted to STM32 HAL sequential slave mode. */
+ * ISR frames the next HAL transfer and (once the full command is in hand)
+ * computes the response synchronously via ho_process_command_isr() above —
+ * HandoverSlave_Routine() below now only logs what already happened, it no
+ * longer decides ho_tx_buf/ho_state itself. This mirrors the proven bench
+ * stub's on_receive/on_request split, adapted to STM32 HAL sequential
+ * slave mode, with the response computation moved into the ISR for
+ * correctness (see ho_process_command_isr()'s doc comment for why). */
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection,
                           uint16_t AddrMatchCode) {
@@ -146,6 +277,12 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
     /* Just received the argument bytes for the command already in hand. */
     ho_rx_have_len = (uint8_t)(ho_rx_have_len + ho_cmd_arg_len(ho_rx_buf[0]));
   }
+
+  /* Full command now in hand (cmd + all its argument bytes) — compute the
+   * response SYNCHRONOUSLY, right here in ISR context, before waking the
+   * task. See ho_process_command_isr()'s doc comment for why this can't
+   * be left to the deferred task. */
+  ho_process_command_isr();
 
   if (ho_rx_sem != NULL) {
     xSemaphoreGiveFromISR(ho_rx_sem, &higher_prio_task_woken);
@@ -239,6 +376,15 @@ void QTZ_HandoverSlave_QueueRelayCommand(uint8_t subsys, uint8_t cmd_id,
 
 /* ── Handler task ─────────────────────────────────────────────────────── */
 
+/**
+ * Logging only — ho_process_command_isr() (called from
+ * HAL_I2C_SlaveRxCpltCallback, in ISR context) has already decided
+ * ho_tx_buf/ho_state/etc. by the time this task wakes. This task just
+ * re-derives what happened from those already-decided values and prints
+ * the corresponding log line — it does NOT make any protocol decisions
+ * itself anymore (moved to ho_process_command_isr() for correctness, see
+ * its doc comment for why).
+ */
 void HandoverSlave_Routine(void *argument) {
   (void)argument;
 
@@ -255,69 +401,43 @@ void HandoverSlave_Routine(void *argument) {
     uint8_t arg0 = (ho_rx_have_len > 2U) ? ho_rx_buf[2] : 0U;
     uint8_t arg1 = (ho_rx_have_len > 3U) ? ho_rx_buf[3] : 0U;
     uint8_t arg2 = (ho_rx_have_len > 4U) ? ho_rx_buf[4] : 0U;
+    uint8_t resp0 =
+        ho_tx_buf[0]; /* already decided by ho_process_command_isr() */
 
     switch (cmd) {
     case HO_PROTO_CMD_PING:
-      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
       QTZ_Debug_Log("[HO] PING -> ACK\n");
       break;
 
     case HO_PROTO_CMD_STATUS_REQ:
-      switch (ho_state) {
-      case HO_SLAVE_STATE_PREPARING:
-        ho_tx_buf[0] = HO_PROTO_RESP_READY;
-        break;
-      case HO_SLAVE_STATE_ACTIVE:
-        ho_tx_buf[0] = HO_PROTO_RESP_ACK;
-        break;
-      case HO_SLAVE_STATE_IDLE:
-      default:
-        ho_tx_buf[0] = HO_PROTO_RESP_NACK;
-        break;
-      }
-      QTZ_Debug_Log("[HO] STATUS_REQ -> 0x%02X\n", ho_tx_buf[0]);
+      QTZ_Debug_Log("[HO] STATUS_REQ -> 0x%02X\n", resp0);
       break;
 
     case HO_PROTO_CMD_PREPARE:
-      if (ho_state != HO_SLAVE_STATE_IDLE) {
-        ho_tx_buf[0] = HO_PROTO_RESP_BUSY;
-        QTZ_Debug_Warning("[HO] PREPARE rejected - not IDLE (state=%d)\n",
-                          (int)ho_state);
+      if (resp0 == HO_PROTO_RESP_BUSY) {
+        QTZ_Debug_Warning("[HO] PREPARE rejected - not IDLE\n");
       } else {
-        ho_active_subsystems = subcmd; /* PREPARE's single arg byte */
-        ho_state = HO_SLAVE_STATE_PREPARING;
-        ho_tx_buf[0] = HO_PROTO_RESP_ACK;
         QTZ_Debug_Log("[HO] PREPARE subsys=0x%02X -> ACK\n", subcmd);
       }
       break;
 
     case HO_PROTO_CMD_START:
-      if (ho_state != HO_SLAVE_STATE_PREPARING) {
-        ho_tx_buf[0] = HO_PROTO_RESP_NACK;
-        QTZ_Debug_Warning("[HO] START rejected - not PREPARING (state=%d)\n",
-                          (int)ho_state);
+      if (resp0 == HO_PROTO_RESP_NACK) {
+        QTZ_Debug_Warning("[HO] START rejected - not PREPARING\n");
       } else {
-        ho_active_subsystems = subcmd; /* START's single arg byte */
-        ho_state = HO_SLAVE_STATE_ACTIVE;
-        ho_tx_buf[0] = HO_PROTO_RESP_ACK;
         QTZ_Debug_Log("[HO] START subsys=0x%02X -> ACK ** HANDOVER ACTIVE **\n",
                       subcmd);
       }
       break;
 
     case HO_PROTO_CMD_ABORT:
-      ho_active_subsystems = HO_PROTO_SUBSYS_NONE;
-      ho_state = HO_SLAVE_STATE_IDLE;
-      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
       QTZ_Debug_Log("[HO] ABORT reason=0x%02X -> IDLE\n", subcmd);
       break;
 
     case HO_PROTO_CMD_HEARTBEAT_REQ:
-      if (ho_lora_tx_pending && ho_state == HO_SLAVE_STATE_ACTIVE) {
-        ho_tx_buf[0] = HO_PROTO_RESP_HEARTBEAT_LORA_PENDING;
+      if (resp0 == HO_PROTO_RESP_HEARTBEAT_LORA_PENDING) {
         QTZ_Debug_Log("[HO] HEARTBEAT_REQ -> HEARTBEAT_LORA_PENDING\n");
       } else {
-        ho_tx_buf[0] = HO_PROTO_RESP_HEARTBEAT;
         QTZ_Debug_Log("[HO] HEARTBEAT_REQ -> HEARTBEAT\n");
       }
       break;
@@ -325,13 +445,8 @@ void HandoverSlave_Routine(void *argument) {
     case HO_PROTO_CMD_LORA_GRANT:
       /* ACK + log only for this prototype pass — no real LoRa/SPI TX
        * control exists yet (blocked on the unresolved SPI-arbitration /
-       * SAMD21-vs-direct-SPI topology question for PLD2). On APPROVED,
-       * clear the pending flag (simulating "done" since there's nothing
-       * real to transmit); on DENIED, leave it set so the next heartbeat
-       * naturally asks again. */
-      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
+       * SAMD21-vs-direct-SPI topology question for PLD2). */
       if (subcmd == HO_PROTO_RESP_LORA_APPROVED) {
-        ho_lora_tx_pending = false;
         QTZ_Debug_Log("[HO] LORA_GRANT -> APPROVED -> ACK (would transmit)\n");
       } else if (subcmd == HO_PROTO_RESP_LORA_DENIED) {
         QTZ_Debug_Log("[HO] LORA_GRANT -> DENIED -> ACK (will retry)\n");
@@ -346,29 +461,19 @@ void HandoverSlave_Routine(void *argument) {
        * forwarding yet. Will be wired to QTZ_OBC_SendCommand() once the
        * ground command system is active, same deferral pattern as ADM's
        * prototype-to-flight transition. */
-      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
       QTZ_Debug_Log("[HO] PAYLOAD_RELAY subcmd=0x%02X arg0=%u arg1=%u -> ACK "
                     "(would forward)\n",
                     subcmd, arg0, arg1);
       break;
 
     case HO_PROTO_CMD_RELAY_POLL:
-      /* 5-byte response: ho_tx_resp_len() at the read-phase AddrCallback
-       * already knows this command needs all 5 bytes, not just tx_buf[0]. */
-      if (ho_relay_queued) {
-        ho_tx_buf[0] = HO_PROTO_RESP_RELAY_PENDING;
-        ho_tx_buf[1] = ho_relay_subsys;
-        ho_tx_buf[2] = ho_relay_cmd_id;
-        ho_tx_buf[3] = ho_relay_param0;
-        ho_tx_buf[4] = ho_relay_param1;
-        ho_relay_queued = false; /* consumed — single-slot queue */
+      if (resp0 == HO_PROTO_RESP_RELAY_PENDING) {
         QTZ_Debug_Log("[HO] RELAY_POLL -> PENDING subsys=0x%02X cmd_id=0x%02X "
                       "param0=%u param1=%u\n",
                       ho_tx_buf[1], ho_tx_buf[2], ho_tx_buf[3], ho_tx_buf[4]);
-      } else {
-        ho_tx_buf[0] = HO_PROTO_RESP_NACK;
-        ho_tx_buf[1] = ho_tx_buf[2] = ho_tx_buf[3] = ho_tx_buf[4] = 0U;
       }
+      /* NACK case: no log, matches original behavior (silent — this is
+       * the expected common case, polled every ~1s). */
       break;
 
     case HO_PROTO_CMD_RELAY_RESULT:
@@ -377,14 +482,12 @@ void HandoverSlave_Routine(void *argument) {
        * QueueRelayCommand() has no real caller either (see its doc
        * comment). arg naming here: subcmd=subsys, arg0=cmd_id,
        * arg1=result0, arg2=result1 (RELAY_RESULT's 4 arg bytes). */
-      ho_tx_buf[0] = HO_PROTO_RESP_ACK;
       QTZ_Debug_Log(
           "[HO] RELAY_RESULT subsys=0x%02X cmd_id=0x%02X r0=%u r1=%u -> ACK\n",
           subcmd, arg0, arg1, arg2);
       break;
 
     default:
-      ho_tx_buf[0] = HO_PROTO_RESP_NACK;
       QTZ_Debug_Warning("[HO] UNKNOWN cmd=0x%02X -> NACK\n", cmd);
       break;
     }
