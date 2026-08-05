@@ -1,3 +1,6 @@
+from operator import index
+
+import random ##Solo para pruebas por ahora
 import sensor
 import time
 import ml
@@ -69,6 +72,10 @@ send_buffer = bytearray(1024)
 
 clock = time.clock()
 
+index_limit = 0 # Variable para control de limites de cantidad de imagenes guardadas
+index_limit_act = 10
+rand_arch = 0
+num_actual = 0
 
 # ---------------- LABELS (por modelo) ----------------
 def load_labels(path):
@@ -182,6 +189,14 @@ while True:
                         print("Encontrado:", archivo)
                         #img = image.Image(direct + archivo)
                         #print(img.compressed_for_ide(),end="")
+
+
+                #nombre = input("Ingrese el nombre del archivo:")
+                #if nombre in archivos:
+                    #print("Archivo encontrado...")
+                #else:
+                    #print("Archivo no encontrado")
+
                 # Pedir ingreso nombre de la imagen requerida
                 # Activar SPI
                 # Empaquetar
@@ -195,8 +210,6 @@ while True:
                 rtc = pyb.RTC()
                 fecha_hora = rtc.datetime()
                 nombre = "images/capture_%d%d%d_%d%d%d.jpg" % (fecha_hora[0], fecha_hora[1], fecha_hora[2], fecha_hora[4], fecha_hora[5], fecha_hora[6])
-                #img.save(nombre)
-                #filename = "images/cp%d.jpg" % time.ticks_ms() #Nombrar de forma adecuada
                 img.save(nombre,quality = 100)
                 gc.collect()
                 print("Guardada:", nombre)
@@ -206,19 +219,18 @@ while True:
 
                 total_size = len(datos_jpeg)
                 paquete_size = 1024
-                # Calculo del total de paquetes
+                #-----Calculo del total de paquetes-----
                 total_pkts = (total_size + paquete_size - 1) // paquete_size
-
                 print("Tamaño JPEG:", total_size, "bytes en", total_pkts, "paquetes")
 
-                # Enviar la cantidad de paquetes que se van a enviar
+                #-----Enviar la cantidad de paquetes que se van a enviar-----
                 response = "SIZE:%d,PKTS:%d" % (total_size, total_pkts)
                 try:
                     i2c.send(response + "\n")
                 except:
                     pass
 
-                # Enviar paquete por paquete por SPI
+                #------Enviar paquete por paquete por SPI------
                 for i in range(total_pkts):
                     inicio = i * paquete_size
                     fin = inicio + paquete_size
@@ -228,9 +240,12 @@ while True:
                     if len(fragmento) < paquete_size:
                         fragmento += bytearray(paquete_size - len(fragmento))
 
-                    print("Esperando reloj del Maestro para paquete", i + 1)
+                    print("Esperando reloj del Maestro para paquete", i + 1) #Enviar una respuesta con un caracter para activar la comunicación SPI
                     try:
                         # Mandamos el fragmento por SPI
+                        #
+                        # Modular el sistema para que no dependa de un solo comando
+                        #
                         spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
                     except Exception as e:
                         print("Error enviando paquete SPI:", e)
@@ -239,7 +254,49 @@ while True:
                 print("Transmisión de imagen finalizada.")
 
                 # Se vacia la respuesta para evitar enviar datos por I2C luego del bucle.
-                response = ""
+                response = "SAVED CAPTURE"
+
+            #-------- FUNCION DE AUTOMATIZACIÓN DEL SISTEMA ---------
+            elif cmd == 'A':
+                direct = "images"
+                archivos = os.listdir(direct)
+                num_imagenes = sum(1 for f in archivos if f.endswith('jpg'))
+
+                if num_imagenes < 10 and index_limit < index_limit_act:
+                    img = sensor.snapshot()
+                    rtc = pyb.RTC()
+                    fecha_hora = rtc.datetime()
+                    nombre = "images/capture_%d%d%d_%d%d%d.jpg" % (fecha_hora[0], fecha_hora[1], fecha_hora[2], fecha_hora[4], fecha_hora[5], fecha_hora[6])
+                    img.save(nombre,quality = 100)
+                    gc.collect()
+                    print("Guardada:", nombre)
+                    num_imagenes = num_actual
+                    index_limit=+ 1
+
+                ## Falta estancar cuando existan 10 archivos, sino entre a ambos if cada vez que se elimite un archivo, ya que no son 10
+                #
+                while num_imagenes == num_actual: ##Pendiente de implementar
+
+                elif num_imagenes == 10 and index_limit == index_limit_act:
+                    index_limit_act =+ 10
+                    #hacer un random de 3 a 4 imagenes para enviar
+                    #os.remove("nombre_archivo.jpg")
+                    ruta = "images"
+                    archivos = os.listdir(ruta)
+
+                    if rand_arch < 3:
+                        if archivos:
+                            img_aleat = random.choice(archivos)
+                            print("Archivo: ", img_aleat)
+                            #Mandamos por SPI
+                            #os.remove(img_aleat) #Como removemos
+                        rand_arch += 1
+
+                    elif rand_arch == 3:
+                        rand_arch = 0
+                        response = "Send 3 img"
+
+                response = "CantImg:%d" %(num_imagenes)
 
             # ------ FUNCIONES EXTRAS -------
             elif cmd == 'B':

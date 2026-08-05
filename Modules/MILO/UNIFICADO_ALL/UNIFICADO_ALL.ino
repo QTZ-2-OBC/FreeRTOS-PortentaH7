@@ -14,6 +14,11 @@ const int csPin = 2; //Pin selector de esclavo.
 
 const int TX_ENABLE_PIN = 4;  // Connects to DE and RE of the transceiver
 
+//Variables para control tiempo
+usingned long tiempoAnterior = 0;
+const long intervalo = 10000;
+uint16_t cant_comand = 0;
+
 void setup() {
   Serial.begin(115200);
   Serial1.begin(115200); // Pins 13 y 14
@@ -47,6 +52,7 @@ const char *COMMANDS[] = {
 
     "O", "Turn [o]ff Model",
 
+    "A", "[A]utomatic Sistem"
     "B", "[B]rightness +",
     "b", "[B]rightness -",
     "C", "[C]ontrast +",
@@ -55,7 +61,7 @@ const char *COMMANDS[] = {
     "r", "[R]eset OpenMV Cam",
     "i", "[I]mage Result",
     "p", "[P]ing",
-    "R", "Cambio a SPI",
+    "S", "Cambio a SPI",
 };
 
 void printMenu() {
@@ -100,7 +106,8 @@ void sendCommand(char cmd) {
   //------------------Logica para transmisión de Imagen -----------------
   //---------------------------------------------------------------------
 
-    if (cmd == 'S' && strncmp(i2c_response, "SIZE:", 5) == 0) {
+    if (cmd == 'S' && strncmp(i2c_response, "SIZE:", 5) == 0 || i2c_response = "S") {
+        // Como prueba usar la S de respuesta para activar el modo envio por SPI
       int total_size = 0;
       int total_pkts = 0;
 
@@ -197,4 +204,15 @@ void loop() {
     Serial1.print("0DONE");
   }
   Serial.println("DONE!");
+
+  //Control de Automatización del sistema
+  usingned long tiempoActual = millis();
+  if(tiempoActual-tiempoAnterior >= invervalo and cant_comand < 3){
+      tiempoAnterior = tiempoActual;
+      sendCommand('A');
+      cant_comand =+ 1;
+      if(cant_comand == 3){
+          cant_comand = 0;
+      }
+  }
 }
