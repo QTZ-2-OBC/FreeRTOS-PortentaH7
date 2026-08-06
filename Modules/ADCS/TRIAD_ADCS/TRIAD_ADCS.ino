@@ -10,6 +10,12 @@
 #include <Wire.h>
 #include <math.h>
 
+//Varibles para control de tiempo de transmisión de datos
+unsigned long tiempoAnterior = 0;
+const long intervalo = 5000;
+uint16_t cant_command = 0;
+//-------------------------------------------------------
+
 const int MAX_RETRIES = 3;
 const int ACK_TIMEOUT = 50;
 
@@ -261,6 +267,20 @@ void loop() {
   // Serial.println("Eclipse: sin vector Sol, TRIAD en pausa");
   // }
   // delay(1000);  //  mas rapido para capturar mas puntos
+
+  //---------Automatización del sistema Prueba--------------------
+  unsigned long tiempoActual = millis();
+  //Se envia la data cada 5s(Sugeto a cambios)
+  if(tiempoActual-tiempoAnterior >= intervalo){
+      tiempoAnterior = tiempoActual;
+      //Envio de datos telemetricos
+      readmag(magVec[0], magVec[1], magVec[2], 2);
+      readIMU();
+      sunValid = computeSunVector(sunVec);
+      // TODO: Send bytes read from sensor...
+      sendRS485("0BYTES");
+  }
+
 }
 
 // ---------------------- LECTURA DE LA IMU -----------------------------
