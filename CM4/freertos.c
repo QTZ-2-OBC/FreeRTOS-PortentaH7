@@ -9,12 +9,11 @@
 #include "adcs.h"
 #include "cmsis_os2.h"
 #include "debug.h"
-#include "i2c.h"
+#include "handover_slave.h"
 #include "main.h"
 #include "milo.h"
 #include "obc.h"
 #include "portable.h"
-#include "stm32h7xx_hal_i2c.h"
 #include "task.h"
 #include <common.h>
 #include <rs485.h>
@@ -24,21 +23,24 @@ osThreadId_t milo_thread;
 const osThreadAttr_t milo_thread_attributes = {
     .name = "milo_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 1024 * 2,
+    .stack_size = 256 * 8,
 };
 
 osThreadId_t adcs_thread;
 const osThreadAttr_t adcs_thread_attributes = {
     .name = "adcs_task",
     .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 1024 * 2,
+    .stack_size = 256 * 8,
 };
 
-osThreadId_t i2c_thread;
-const osThreadAttr_t i2c_thread_attributes = {
-    .name = "i2c_task",
-    .priority = (osPriority_t)osPriorityNormal,
-    .stack_size = 1024 * 2,
+osThreadId_t handover_thread;
+const osThreadAttr_t handover_thread_attributes = {
+    .name = "handover_task",
+    // Above adcs_thread's priority: the A3200 enforces a 10 ms round-trip
+    // timeout on every handover I2C transaction, so this task must be
+    // scheduled promptly. Revisit if bring-up shows ho ping timeouts.
+    .priority = (osPriority_t)osPriorityAboveNormal,
+    .stack_size = 256 * 8,
 };
 
 #define mainHAL_MAX_TIMEOUT 0xFFFFFFFFUL
@@ -46,37 +48,6 @@ const osThreadAttr_t i2c_thread_attributes = {
 void PrintAvailableHeap() {
   size_t free_heap = xPortGetFreeHeapSize();
   QTZ_Debug_Log("Available HEAP SIZE: %d\n", free_heap);
-}
-
-void I2C_Routine(void *argument) {
-  (void)(argument);
-  // NOTE: Initialize the LED pin on blue.
-  GPIO_InitTypeDef GPIO_InitStructure;
-  GPIO_InitStructure.Pin = LED_B_Pin;
-  GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_B_GPIO_Port, &GPIO_InitStructure);
-  HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);
-
-  QTZ_ByteArray_Create(buffer, data, 64);
-  while (1) {
-    // osDelay(750);
-    QTZ_ByteArray_Reset(&buffer);
-    // HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-
-    const int msg_length = 1;
-    HAL_StatusTypeDef status =
-        HAL_I2C_Slave_Receive(&hi2c1, buffer.data, msg_length, 2000);
-    if (status != HAL_OK) {
-      QTZ_Debug_Error("Failed to obtain data from I2C: %d", status);
-      // Error_Handler();
-    }
-    buffer.length += msg_length;
-
-    HAL_I2C_Slave_Transmit(&hi2c1, buffer.data, msg_length, 2000);
-
-    QTZ_Debug_Log("DATA: %.*s", buffer.data, buffer.length);
-  }
 }
 
 void ADCS_Routine(void *argument) {
@@ -106,7 +77,7 @@ void ADCS_Routine(void *argument) {
   };
 
   while (1) {
-    // osDelay(750);
+    osDelay(750);
     QTZ_ByteArray_Reset(&buffer);
     HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
 
@@ -115,14 +86,22 @@ void ADCS_Routine(void *argument) {
       QTZ_OBC_Command cmd = commands[i];
       QTZ_OBC_Result response_status = QTZ_OBC_SendCommand(cmd, &buffer);
       if (response_status != QTZ_OBC_OK) {
-        QTZ_Debug_Error("Response is not ok! HALTING...");
-        Error_Handler();
+        // Softened from Error_Handler() (halted the whole task forever on
+        // any single RS485 hiccup) to log-and-continue: rs485_framed.c
+        // already records this failure for the handover heartbeat's RS485
+        // status bit (see QTZ_RS485F_IsHealthy()) — nothing further to do
+        // here but skip the rest of this cycle's commands and retry next
+        // cycle instead of taking the board down with it.
+        QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
+                          "this cycle\n",
+                          response_status);
+        break;
       }
 
       if (QTZ_MILO_ImageStatistics == cmd.command_id) {
         if (buffer.length == 0) {
-          QTZ_Debug_Error("No data written to buffer!\n");
-          Error_Handler();
+          QTZ_Debug_Warning("No data written to buffer - skipping\n");
+          continue;
         }
         QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
       }
@@ -202,14 +181,22 @@ void MILO_Routine(void *argument) {
       QTZ_OBC_Command cmd = commands[i];
       QTZ_OBC_Result response_status = QTZ_OBC_SendCommand(cmd, &buffer);
       if (response_status != QTZ_OBC_OK) {
-        QTZ_Debug_Error("Response is not ok! HALTING...");
-        Error_Handler();
+        // Softened from Error_Handler() (halted the whole task forever on
+        // any single RS485 hiccup) to log-and-continue: rs485_framed.c
+        // already records this failure for the handover heartbeat's RS485
+        // status bit (see QTZ_RS485F_IsHealthy()) — nothing further to do
+        // here but skip the rest of this cycle's commands and retry next
+        // cycle instead of taking the board down with it.
+        QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
+                          "this cycle\n",
+                          response_status);
+        break;
       }
 
       if (QTZ_MILO_ImageStatistics == cmd.command_id) {
         if (buffer.length == 0) {
-          QTZ_Debug_Error("No data written to buffer!\n");
-          Error_Handler();
+          QTZ_Debug_Warning("No data written to buffer - skipping\n");
+          continue;
         }
         QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
       }
@@ -221,5 +208,10 @@ void MILO_Routine(void *argument) {
 void MX_FREERTOS_Init(void) {
   // milo_thread = osThreadNew(MILO_Routine, NULL, &milo_thread_attributes);
   // adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
-  i2c_thread = osThreadNew(I2C_Routine, NULL, &i2c_thread_attributes);
+
+  // Quetzal-2 handover prototype: I2C1 must already be initialised (see
+  // CM4/main.c's MX_I2C1_Init() call) before this runs.
+  QTZ_HandoverSlave_Init();
+  handover_thread =
+      osThreadNew(HandoverSlave_Routine, NULL, &handover_thread_attributes);
 }
