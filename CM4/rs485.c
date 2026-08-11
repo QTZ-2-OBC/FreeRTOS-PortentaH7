@@ -17,9 +17,11 @@ void QTZ_RS485_EndTransmission() {
 
 void QTZ_RS485_BeginReception() {
   HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_RESET);
+  osDelay(100);
 }
 void QTZ_RS485_EndReception() {
   HAL_GPIO_WritePin(QTZ_RS485_RE_BASE, QTZ_RS485_RE_Pin, GPIO_PIN_SET);
+  osDelay(100);
 }
 
 void QTZ_RS485_EnableRS485(QTZ_Bool enable) {
@@ -155,16 +157,16 @@ QTZ_SENDRS485_Result QTZ_RS485_Send(QTZ_ByteArray *buffer, uint32_t timeout) {
   return QTZ_SENDRS485_OK;
 }
 
-QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
-                                          uint32_t timeout) {
+// Shared core: issues the actual HAL_UART_Receive() call and maps its
+// result. Does NOT touch RE/flags — callers decide that (see
+// QTZ_RS485_Receive vs QTZ_RS485_ReceiveRaw in the header for why).
+static QTZ_RECEIVERS485_Result rs485_receive_core(QTZ_ByteArray *buffer,
+                                                   uint16_t size,
+                                                   uint32_t timeout) {
   if (size > QTZ_ByteArray_Remaining(buffer)) {
     return QTZ_RECEIVERS485_NotEnoughSpace;
   }
 
-  // NOTE: Clear NEF and ORE to receive the whole message of the wire.
-  __HAL_UART_CLEAR_NEFLAG(QTZ_RS485_UART_HANDLE);
-  __HAL_UART_CLEAR_OREFLAG(QTZ_RS485_UART_HANDLE);
-  QTZ_RS485_BeginReception();
   HAL_StatusTypeDef result = HAL_UART_Receive(
       QTZ_RS485_UART_HANDLE, QTZ_ByteArray_Current(buffer), size, timeout);
   if (HAL_OK != result) {
@@ -200,4 +202,18 @@ QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
   buffer->length += size;
 
   return QTZ_RECEIVERS485_OK;
+}
+
+QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
+                                          uint32_t timeout) {
+  // NOTE: Clear NEF and ORE to receive the whole message of the wire.
+  __HAL_UART_CLEAR_NEFLAG(QTZ_RS485_UART_HANDLE);
+  __HAL_UART_CLEAR_OREFLAG(QTZ_RS485_UART_HANDLE);
+  QTZ_RS485_BeginReception();
+  return rs485_receive_core(buffer, size, timeout);
+}
+
+QTZ_RECEIVERS485_Result QTZ_RS485_ReceiveRaw(QTZ_ByteArray *buffer,
+                                             uint16_t size, uint32_t timeout) {
+  return rs485_receive_core(buffer, size, timeout);
 }

@@ -18,10 +18,8 @@
 // UART Base handle to use for the UART protocol
 #define QTZ_RS485_UART_HANDLE &huart4
 
-// #define QTZ_RS485_PRE_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
-// #define QTZ_RS485_POST_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
-#define QTZ_RS485_PRE_DELAY 5
-#define QTZ_RS485_POST_DELAY 5
+#define QTZ_RS485_PRE_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
+#define QTZ_RS485_POST_DELAY ((1.0f / 115200.0) * 9.6f * 3.5f * 1e6)
 
 // Initialize the GPIO pins for RS485 transmission.
 void QTZ_RS485_InitGPIO();
@@ -56,4 +54,19 @@ typedef enum {
 } QTZ_RECEIVERS485_Result;
 QTZ_RECEIVERS485_Result QTZ_RS485_Receive(QTZ_ByteArray *buffer, uint16_t size,
                                           uint32_t timeout);
+
+// Like QTZ_RS485_Receive, but does NOT call QTZ_RS485_BeginReception() or
+// clear the NE/ORE flags first.
+//
+// QTZ_RS485_Receive() pays a fixed ~100ms cost on every call (RE-pin
+// settle delay inside QTZ_RS485_BeginReception()). That's fine for a
+// single one-shot read, but callers that need several back-to-back reads
+// as part of one logical multi-part read (e.g. rs485_framed.c's frame
+// parser, which reads START/SEQ+LEN/PAYLOAD+CRC+END as separate chunks)
+// must call QTZ_RS485_BeginReception() ONCE themselves before the first
+// chunk, then use this function for every subsequent chunk — otherwise
+// that 100ms is paid per chunk (or worse, per byte) and can exceed short
+// timeout budgets before a single byte is even read.
+QTZ_RECEIVERS485_Result QTZ_RS485_ReceiveRaw(QTZ_ByteArray *buffer,
+                                             uint16_t size, uint32_t timeout);
 #endif

@@ -86,14 +86,21 @@ void ADCS_Routine(void *argument) {
       QTZ_OBC_Command cmd = commands[i];
       QTZ_OBC_Result response_status = QTZ_OBC_SendCommand(cmd, &buffer);
       if (response_status != QTZ_OBC_OK) {
-        QTZ_Debug_Error("Response is not ok! HALTING...");
-        Error_Handler();
+        // Softened from Error_Handler() (halted the whole task forever on
+        // any single RS485 hiccup) to log-and-continue: rs485_framed.c
+        // already records this failure for the handover heartbeat's RS485
+        // status bit (see QTZ_RS485F_IsHealthy()) — nothing further to do
+        // here but skip the rest of this cycle's commands and retry next
+        // cycle instead of taking the board down with it.
+        QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
+                          "this cycle\n", response_status);
+        break;
       }
 
       if (QTZ_MILO_ImageStatistics == cmd.command_id) {
         if (buffer.length == 0) {
-          QTZ_Debug_Error("No data written to buffer!\n");
-          Error_Handler();
+          QTZ_Debug_Warning("No data written to buffer - skipping\n");
+          continue;
         }
         QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
       }
@@ -173,14 +180,21 @@ void MILO_Routine(void *argument) {
       QTZ_OBC_Command cmd = commands[i];
       QTZ_OBC_Result response_status = QTZ_OBC_SendCommand(cmd, &buffer);
       if (response_status != QTZ_OBC_OK) {
-        QTZ_Debug_Error("Response is not ok! HALTING...");
-        Error_Handler();
+        // Softened from Error_Handler() (halted the whole task forever on
+        // any single RS485 hiccup) to log-and-continue: rs485_framed.c
+        // already records this failure for the handover heartbeat's RS485
+        // status bit (see QTZ_RS485F_IsHealthy()) — nothing further to do
+        // here but skip the rest of this cycle's commands and retry next
+        // cycle instead of taking the board down with it.
+        QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
+                          "this cycle\n", response_status);
+        break;
       }
 
       if (QTZ_MILO_ImageStatistics == cmd.command_id) {
         if (buffer.length == 0) {
-          QTZ_Debug_Error("No data written to buffer!\n");
-          Error_Handler();
+          QTZ_Debug_Warning("No data written to buffer - skipping\n");
+          continue;
         }
         QTZ_Debug_Log("Statistics: %.*s\n", buffer.length - 1, buffer.data + 1);
       }
@@ -191,7 +205,7 @@ void MILO_Routine(void *argument) {
 
 void MX_FREERTOS_Init(void) {
   // milo_thread = osThreadNew(MILO_Routine, NULL, &milo_thread_attributes);
-  // adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
+  adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
 
   // Quetzal-2 handover prototype: I2C1 must already be initialised (see
   // CM4/main.c's MX_I2C1_Init() call) before this runs.
