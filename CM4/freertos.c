@@ -93,7 +93,8 @@ void ADCS_Routine(void *argument) {
         // here but skip the rest of this cycle's commands and retry next
         // cycle instead of taking the board down with it.
         QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
-                          "this cycle\n", response_status);
+                          "this cycle\n",
+                          response_status);
         break;
       }
 
@@ -187,7 +188,8 @@ void MILO_Routine(void *argument) {
         // here but skip the rest of this cycle's commands and retry next
         // cycle instead of taking the board down with it.
         QTZ_Debug_Warning("Response is not ok (result=%d) - skipping rest of "
-                          "this cycle\n", response_status);
+                          "this cycle\n",
+                          response_status);
         break;
       }
 
@@ -205,7 +207,7 @@ void MILO_Routine(void *argument) {
 
 void MX_FREERTOS_Init(void) {
   // milo_thread = osThreadNew(MILO_Routine, NULL, &milo_thread_attributes);
-  adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
+  // adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
 
   // Quetzal-2 handover prototype: I2C1 must already be initialised (see
   // CM4/main.c's MX_I2C1_Init() call) before this runs.
