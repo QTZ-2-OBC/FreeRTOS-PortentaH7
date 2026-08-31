@@ -29,85 +29,80 @@
 
 #include "stm32h7xx_hal.h"
 
-#define UART_PINGPONG_LEN        10U
-#define UART_PP_WATCHDOG_LIMIT   1000U   /* max supervisor ticks per phase */
+#define UART_PINGPONG_LEN 10U
+#define UART_PP_WATCHDOG_LIMIT 1000U /* max supervisor ticks per phase */
 
-typedef enum
-{
-    UART_PP_STATE_IDLE = 0,
-    UART_PP_STATE_RX_PENDING,
-    UART_PP_STATE_TX_PENDING,
-    UART_PP_STATE_ERROR
+typedef enum {
+  UART_PP_STATE_IDLE = 0,
+  UART_PP_STATE_RX_PENDING,
+  UART_PP_STATE_TX_PENDING,
+  UART_PP_STATE_ERROR
 } UART_PingPongState_t;
 
-typedef struct
-{
-    UART_HandleTypeDef  *huart;
-    uint8_t              buffer[UART_PINGPONG_LEN];
-    volatile UART_PingPongState_t state;
-    volatile uint32_t    watchdogTicks;
+typedef struct {
+  UART_HandleTypeDef *huart;
+  uint8_t buffer[UART_PINGPONG_LEN];
+  volatile UART_PingPongState_t state;
+  volatile uint32_t watchdogTicks;
 } UART_PingPong_t;
 
 /**
  * @brief  Arm the link and start listening for the first 10-byte frame.
  */
-HAL_StatusTypeDef UART_PingPong_IT_Start(UART_PingPong_t *ctx, UART_HandleTypeDef *huart)
-{
-    if ((ctx == NULL) || (huart == NULL))                  /* assertion 1 */
-    {
-        return HAL_ERROR;
-    }
-    if (HAL_UART_GetState(huart) == HAL_UART_STATE_RESET)   /* assertion 2 */
-    {
-        return HAL_ERROR;
-    }
+HAL_StatusTypeDef UART_PingPong_IT_Start(UART_PingPong_t *ctx,
+                                         UART_HandleTypeDef *huart) {
+  if ((ctx == NULL) || (huart == NULL)) /* assertion 1 */
+  {
+    return HAL_ERROR;
+  }
+  if (HAL_UART_GetState(huart) == HAL_UART_STATE_RESET) /* assertion 2 */
+  {
+    return HAL_ERROR;
+  }
 
-    ctx->huart         = huart;
-    ctx->watchdogTicks = 0U;
-    ctx->state         = UART_PP_STATE_RX_PENDING;
+  ctx->huart = huart;
+  ctx->watchdogTicks = 0U;
+  ctx->state = UART_PP_STATE_RX_PENDING;
 
-    return HAL_UART_Receive_IT(huart, ctx->buffer, UART_PINGPONG_LEN);
+  return HAL_UART_Receive_IT(huart, ctx->buffer, UART_PINGPONG_LEN);
 }
 
 /** @brief  Transition on RX complete: flip straight into echoing it back. */
-void UART_PingPong_IT_OnRxComplete(UART_PingPong_t *ctx)
-{
-    if (ctx == NULL)                                        /* assertion 1 */
-    {
-        return;
-    }
-    if (ctx->state != UART_PP_STATE_RX_PENDING)              /* assertion 2 */
-    {
-        ctx->state = UART_PP_STATE_ERROR;
-        return;
-    }
+void UART_PingPong_IT_OnRxComplete(UART_PingPong_t *ctx) {
+  if (ctx == NULL) /* assertion 1 */
+  {
+    return;
+  }
+  if (ctx->state != UART_PP_STATE_RX_PENDING) /* assertion 2 */
+  {
+    ctx->state = UART_PP_STATE_ERROR;
+    return;
+  }
 
-    ctx->state = UART_PP_STATE_TX_PENDING;
-    if (HAL_UART_Transmit_IT(ctx->huart, ctx->buffer, UART_PINGPONG_LEN) != HAL_OK)
-    {
-        ctx->state = UART_PP_STATE_ERROR;                    /* Rule 7 */
-    }
+  ctx->state = UART_PP_STATE_TX_PENDING;
+  if (HAL_UART_Transmit_IT(ctx->huart, ctx->buffer, UART_PINGPONG_LEN) !=
+      HAL_OK) {
+    ctx->state = UART_PP_STATE_ERROR; /* Rule 7 */
+  }
 }
 
-/** @brief  Transition on TX complete: re-arm the receiver for the next frame. */
-void UART_PingPong_IT_OnTxComplete(UART_PingPong_t *ctx)
-{
-    if (ctx == NULL)
-    {
-        return;
-    }
-    if (ctx->state != UART_PP_STATE_TX_PENDING)
-    {
-        ctx->state = UART_PP_STATE_ERROR;
-        return;
-    }
+/** @brief  Transition on TX complete: re-arm the receiver for the next frame.
+ */
+void UART_PingPong_IT_OnTxComplete(UART_PingPong_t *ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+  if (ctx->state != UART_PP_STATE_TX_PENDING) {
+    ctx->state = UART_PP_STATE_ERROR;
+    return;
+  }
 
-    ctx->state         = UART_PP_STATE_RX_PENDING;
-    ctx->watchdogTicks = 0U;
-    if (HAL_UART_Receive_IT(ctx->huart, ctx->buffer, UART_PINGPONG_LEN) != HAL_OK)
-    {
-        ctx->state = UART_PP_STATE_ERROR;
-    }
+  ctx->state = UART_PP_STATE_RX_PENDING;
+  ctx->watchdogTicks = 0U;
+  if (HAL_UART_Receive_IT(ctx->huart, ctx->buffer, UART_PINGPONG_LEN) !=
+      HAL_OK) {
+    ctx->state = UART_PP_STATE_ERROR;
+  }
 }
 
 /**
@@ -116,55 +111,65 @@ void UART_PingPong_IT_OnTxComplete(UART_PingPong_t *ctx)
  *         otherwise-unbounded "wait for the interrupt" into a Rule-2
  *         compliant bounded wait.
  */
-void UART_PingPong_IT_Supervise(UART_PingPong_t *ctx)
-{
-    if (ctx == NULL)
-    {
-        return;
-    }
-    if (ctx->state == UART_PP_STATE_ERROR)
-    {
-        return;
-    }
+void UART_PingPong_IT_Supervise(UART_PingPong_t *ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+  if (ctx->state == UART_PP_STATE_ERROR) {
+    return;
+  }
 
-    ctx->watchdogTicks++;
-    if (ctx->watchdogTicks > UART_PP_WATCHDOG_LIMIT)
-    {
-        (void)HAL_UART_AbortReceive_IT(ctx->huart);
-        (void)HAL_UART_AbortTransmit_IT(ctx->huart);
-        ctx->state = UART_PP_STATE_ERROR;
-    }
+  ctx->watchdogTicks++;
+  if (ctx->watchdogTicks > UART_PP_WATCHDOG_LIMIT) {
+    (void)HAL_UART_AbortReceive_IT(ctx->huart);
+    (void)HAL_UART_AbortTransmit_IT(ctx->huart);
+    ctx->state = UART_PP_STATE_ERROR;
+  }
 }
 
 /* ---- Compile-time dispatch: one context per physical UART link ---- */
 
-static UART_PingPong_t g_link1Ctx;   /* e.g. USART2, first sensor MCU  */
-static UART_PingPong_t g_link2Ctx;   /* e.g. USART3, second sensor MCU */
+static UART_PingPong_t g_link1Ctx; /* e.g. USART2, first sensor MCU  */
+static UART_PingPong_t g_link2Ctx; /* e.g. USART3, second sensor MCU */
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart == g_link1Ctx.huart)
-    {
-        UART_PingPong_IT_OnRxComplete(&g_link1Ctx);
-    }
-    else if (huart == g_link2Ctx.huart)
-    {
-        UART_PingPong_IT_OnRxComplete(&g_link2Ctx);
-    }
-    else
-    {
-        /* Unknown handle: nothing to recover, intentionally ignored. */
-    }
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart == g_link1Ctx.huart) {
+    UART_PingPong_IT_OnRxComplete(&g_link1Ctx);
+  } else if (huart == g_link2Ctx.huart) {
+    UART_PingPong_IT_OnRxComplete(&g_link2Ctx);
+  } else {
+    /* Unknown handle: nothing to recover, intentionally ignored. */
+  }
 }
 
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart == g_link1Ctx.huart)
-    {
-        UART_PingPong_IT_OnTxComplete(&g_link1Ctx);
-    }
-    else if (huart == g_link2Ctx.huart)
-    {
-        UART_PingPong_IT_OnTxComplete(&g_link2Ctx);
-    }
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart == g_link1Ctx.huart) {
+    UART_PingPong_IT_OnTxComplete(&g_link1Ctx);
+  } else if (huart == g_link2Ctx.huart) {
+    UART_PingPong_IT_OnTxComplete(&g_link2Ctx);
+  }
+}
+
+/* ---- Public wiring API - this is the only surface main.c needs ---- */
+
+/**
+ * @brief  Arm both UART links. Call once, after both huart handles have
+ *         been through HAL_UART_Init() (i.e. after the CubeMX-generated
+ *         MX_USARTx_UART_Init() calls in main()).
+ */
+HAL_StatusTypeDef App_UartLinks_Init(UART_HandleTypeDef *huartLink1,
+                                     UART_HandleTypeDef *huartLink2) {
+  HAL_StatusTypeDef status1 = UART_PingPong_IT_Start(&g_link1Ctx, huartLink1);
+  HAL_StatusTypeDef status2 = UART_PingPong_IT_Start(&g_link2Ctx, huartLink2);
+
+  return ((status1 == HAL_OK) && (status2 == HAL_OK)) ? HAL_OK : HAL_ERROR;
+}
+
+/**
+ * @brief  Call once per scheduler tick (e.g. once per 1 ms SysTick, or once
+ *         per super-loop pass) to enforce the Rule 2 bound on both links.
+ */
+void App_UartLinks_Supervise(void) {
+  UART_PingPong_IT_Supervise(&g_link1Ctx);
+  UART_PingPong_IT_Supervise(&g_link2Ctx);
 }
