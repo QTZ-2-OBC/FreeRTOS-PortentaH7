@@ -2,40 +2,41 @@
 #define QTZ_LIB_OBC
 #include "common.h"
 
-// This constant is used to acknowledge when a command response is received.
+// All req/resp follow the pattern:
+// [protocol_id][status][subsys][cmd_id][param0][param1]
 //
-// IT'S IMPORTANT THAT IS ONLY ONE BYTE LONG!
-#define QTZ_OBC_ACK "K"
+// Each 1 byte long.
+#define QTZ_OBC_CMD_LEN 6
 
-typedef enum {
-  QTZ_OBC_MODULE_MILO,
-  QTZ_OBC_MODULE_ADCS,
-} QTZ_OBC_Module;
+#define QTZ_OBC_I2C_TX_LEN QTZ_OBC_CMD_LEN * 3
+#define QTZ_OBC_I2C_RX_LEN QTZ_OBC_CMD_LEN
+
+#define QTZ_OBC_UART_TX_LEN QTZ_OBC_CMD_LEN * 10
+#define QTZ_OBC_UART_RX_LEN QTZ_OBC_CMD_LEN * 10
+
+// Max iterations allowed for the OBC before aborting I2C and UART transmittion.
+#define QTZ_OBC_WATCHDOG_LIMIT 1000U
 
 typedef struct {
-  // Send operation timeout.
-  uint32_t send_timeout;
-  // Receive operation timeout.
-  uint32_t recv_timeout;
-  // Delay before doing any operation.
-  uint32_t pre_delay;
-  // Delay after doing all operations.
-  uint32_t post_delay;
-  // The size of the response in bytes.
-  //
-  // This amount will be written to the provided buffer.
-  uint16_t response_size;
-  // The module ID responsible for managing the command.
-  QTZ_OBC_Module module_id;
-  // The command ID that will be sent.
-  uint8_t command_id;
-} QTZ_OBC_Command;
+  QTZ_ByteArray rx;
+  QTZ_ByteArray tx;
+} QTZ_OBC_SerialInterface;
 
 typedef enum {
-  QTZ_OBC_OK = '0',
-  QTZ_OBC_Timeout,
-} QTZ_OBC_Result;
+  QTZ_OBC_STATE_IDLE = 0,
+  QTZ_OBC_STATE_ERROR,
+  QTZ_OBC_STATE_WAITING_I2C,
+  QTZ_OBC_STATE_WAITING_UART,
+} QTZ_OBC_State;
 
-QTZ_OBC_Result QTZ_OBC_SendCommand(QTZ_OBC_Command cmd,
-                                   QTZ_ByteArray *response_buffer);
+typedef struct {
+  QTZ_OBC_SerialInterface i2c;
+  QTZ_OBC_SerialInterface uart_rs485;
+
+  volatile QTZ_OBC_State state;
+  volatile uint32_t watchdog_ticks;
+} QTZ_OBC_Ctx;
+
+static QTZ_OBC_Ctx GLOBAL_CTX;
+
 #endif
