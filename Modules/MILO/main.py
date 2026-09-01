@@ -82,6 +82,42 @@ num_actual = 0
 def load_labels(path):
     return [line.rstrip('\n') for line in open(path)]
 
+def send_image(image):
+    datos_jpeg = image.bytearray()
+
+    total_size = len(datos_jpeg)
+    paquete_size = 1024
+    #-----Calculo del total de paquetes-----
+    total_pkts = (total_size + paquete_size - 1) // paquete_size
+    print("Tamaño JPEG:", total_size, "bytes en", total_pkts, "paquetes")
+
+    #-----Enviar la cantidad de paquetes que se van a enviar-----
+    response = "SIZE:%d,PKTS:%d" % (total_size, total_pkts)
+    try:
+        i2c.send(response + "\n")
+    except:
+        pass
+
+    #------Enviar paquete por paquete por SPI------
+    for i in range(total_pkts):
+        inicio = i * paquete_size
+        fin = inicio + paquete_size
+        fragmento = datos_jpeg[inicio:fin]
+
+        # Rellenar con ceros los paquetes que no logran el largo deseado
+        if len(fragmento) < paquete_size:
+            fragmento += bytearray(paquete_size - len(fragmento))
+
+        print("Esperando reloj del Maestro para paquete", i + 1) #Enviar una respuesta con un caracter para activar la comunicación SPI
+        try:
+            # Mandamos el fragmento por SPI
+            # Modular el sistema para que no dependa de un solo comando
+            spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
+        except Exception as e:
+            print("Error enviando paquete SPI:", e)
+            break
+
+    print("Transmisión de imagen finalizada.")
 
 # ---------------- LOAD MODEL ----------------
 def load_model(model_id):
@@ -216,39 +252,7 @@ while True:
                 print("Guardada:", nombre)
                 #--------------------------------------
                 img_jpeg = img.compress(quality=50)
-                datos_jpeg = img_jpeg.bytearray()
-
-                total_size = len(datos_jpeg)
-                paquete_size = 1024
-                #-----Calculo del total de paquetes-----
-                total_pkts = (total_size + paquete_size - 1) // paquete_size
-                print("Tamaño JPEG:", total_size, "bytes en", total_pkts, "paquetes")
-
-                #-----Enviar la cantidad de paquetes que se van a enviar-----
-                response = "SIZE:%d,PKTS:%d" % (total_size, total_pkts)
-                try:
-                    i2c.send(response + "\n")
-                except:
-                    pass
-
-                #------Enviar paquete por paquete por SPI------
-                for i in range(total_pkts):
-                    inicio = i * paquete_size
-                    fin = inicio + paquete_size
-                    fragmento = datos_jpeg[inicio:fin]
-
-                    # Rellenar con ceros los paquetes que no logran el largo deseado
-                    if len(fragmento) < paquete_size:
-                        fragmento += bytearray(paquete_size - len(fragmento))
-
-                    print("Esperando reloj del Maestro para paquete", i + 1) #Enviar una respuesta con un caracter para activar la comunicación SPI
-                    try:
-                        # Mandamos el fragmento por SPI
-                        # Modular el sistema para que no dependa de un solo comando
-                        spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
-                    except Exception as e:
-                        print("Error enviando paquete SPI:", e)
-                        break
+                send_image(img_jpeg)
 
                 print("Transmisión de imagen finalizada.")
 
@@ -273,13 +277,12 @@ while True:
                 else:
                     print("Valor no alcanzado")
 
+                send_imgs = [] # Variable temporar la contener a las imagenes
                 # Loop cuando se alcance el limite y hacer el envio de 3 imagenes
                 while num_imagenes == num_img_act:
                     num_img_act += 10
                     ruta = "images"
                     archivos = os.listdir(ruta)
-
-                    send_imgs = [] # Variable temporar la contener a las imagenes
 
                     if rand_arch < 3:#Envio aleatorio de 3/4 archivos de imagen
                         if archivos:
@@ -298,6 +301,8 @@ while True:
                         response = "Send 3 img"
 
                 response = "CantImg:%d" %(num_imagenes)
+                for img in send_imgs
+                    send_image(img)
 
             # ------ FUNCIONES EXTRAS -------
             elif cmd == 'B':
