@@ -8,7 +8,7 @@ typedef enum {
 } QTZ_OBC_OperationResult;
 
 // All req/resp packets follow the pattern:
-// [protocol_id][status][subsys][cmd_id][param0][param1]
+// [protocol_id] - [status] - [subsys] - [cmd_id] - [param0] - [param1]
 //
 // Each 1 byte long.
 typedef struct {

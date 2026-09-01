@@ -1,6 +1,6 @@
-#include <include/common.h>
-#include <include/debug.h>
-#include <include/obc.h>
+#include "include/obc.h"
+#include "include/common.h"
+#include "include/debug.h"
 #include <string.h>
 
 #define QTZ_OBC_ROUTINE_PREFIX "OBC-MR"
@@ -85,17 +85,16 @@ QTZ_OBC_OperationResult QTZ_OBC_ParsePacket(QTZ_ByteArray *buffer,
   if (buffer->length < QTZ_OBC_PACKET_LEN) {
     return QTZ_OBC_RESULT_ERROR;
   }
+  memcpy(p, buffer->data, QTZ_OBC_PACKET_LEN);
+  QTZ_ByteArray_Reset(buffer);
 
-  uint8_t *received = QTZ_ByteArray_Current(buffer);
-  memcpy(p, received, QTZ_OBC_PACKET_LEN);
-
-  if (buffer->length == QTZ_OBC_PACKET_LEN) {
-    QTZ_ByteArray_Reset(buffer);
-  } else {
-    size_t diff = buffer->length - QTZ_OBC_PACKET_LEN;
-    memmove(buffer->data, buffer->data + QTZ_OBC_PACKET_LEN, diff);
-    buffer->length = diff;
-  }
+  // if (buffer->length == QTZ_OBC_PACKET_LEN) {
+  //   QTZ_ByteArray_Reset(buffer);
+  // } else {
+  //   size_t diff = buffer->length - QTZ_OBC_PACKET_LEN;
+  //   memmove(buffer->data, buffer->data + QTZ_OBC_PACKET_LEN, diff);
+  //   buffer->length = diff;
+  // }
 
   return QTZ_OBC_RESULT_OK;
 }
@@ -334,7 +333,7 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
 
   QTZ_Debug_Log(
       "[" QTZ_OBC_ROUTINE_PREFIX
-      "]: State is `%s`, received command: [%d][%d][%d][%d][%d][%d]\n",
+      "]: State is `%s`, received command: [%c][%d][%c][%d][%d][%d]\n",
       QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status, p.subsys,
       p.cmd_id, p.param0, p.param1);
 

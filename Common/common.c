@@ -1,4 +1,4 @@
-#include "./include/common.h"
+#include "include/common.h"
 #include <string.h>
 
 void QTZ_ByteArray_Init(QTZ_ByteArray *self, uint8_t *data, size_t capacity) {
