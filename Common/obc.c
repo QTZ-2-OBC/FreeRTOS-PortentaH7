@@ -1,5 +1,16 @@
 #include <include/common.h>
+#include <include/debug.h>
 #include <include/obc.h>
+#include <string.h>
+
+#define QTZ_OBC_ROUTINE_PREFIX "OBC-MR"
+#define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT                          \
+  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
+  "]: Can't transition from `%s` -> `%s`. State should be: `%s`\n"
+
+#define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION2_LOG_FMT                         \
+  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
+  "]: Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`\n"
 
 // -- I2C --
 uint8_t i2c_rx_buffer[QTZ_OBC_I2C_RX_LEN];
@@ -9,11 +20,47 @@ uint8_t i2c_tx_buffer[QTZ_OBC_I2C_TX_LEN];
 uint8_t uart_rx_buffer[QTZ_OBC_UART_RX_LEN];
 uint8_t uart_tx_buffer[QTZ_OBC_UART_TX_LEN];
 
+// =================
+// -- Private API --
+// =================
+char *QTZ_OBC_StateToStr(QTZ_OBC_State st) {
+  switch (st) {
+  case QTZ_OBC_STATE_IDLE:
+    return "IDLE";
+  case QTZ_OBC_STATE_ERROR:
+    return "ERROR";
+  case QTZ_OBC_STATE_HANDOVER_IDLE:
+    return "HANDOVER_IDLE";
+  }
+}
+
+char *QTZ_OBC_MiloTaskToStr(int variant) {
+  switch (variant) {
+  case QTZ_OBC_MILO_TASK_STATE_UNSTARTED: {
+    return "MILO_UNSTARTED";
+  } break;
+  case QTZ_OBC_MILO_TASK_STATE_BEGIN: {
+    return "MILO_BEGIN";
+  } break;
+  case QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE: {
+    return "MILO_TAKE_PICTURE";
+  } break;
+  case QTZ_OBC_MILO_TASK_STATE_GET_DATA: {
+    return "MILO_GET_DATA";
+  } break;
+  case QTZ_OBC_MILO_TASK_STATE_END: {
+    return "MILO_END";
+  } break;
+  default:
+    return "MILO_UNKNOWN";
+  }
+}
+
 // ================
 // -- Public API --
 // ================
 
-void OBC_InitWithGlobals(QTZ_OBC_Ctx *ctx) {
+void QTZ_OBC_InitWithGlobals(QTZ_OBC_Ctx *ctx) {
   QTZ_ByteArray_CreateOnlyBuffer(rx_buff, i2c_rx_buffer, QTZ_OBC_I2C_RX_LEN);
   QTZ_ByteArray_CreateOnlyBuffer(tx_buff, i2c_tx_buffer, QTZ_OBC_I2C_TX_LEN);
 
@@ -30,4 +77,274 @@ void OBC_InitWithGlobals(QTZ_OBC_Ctx *ctx) {
   ctx->watchdog_ticks = 0;
 }
 
-void OBC_Tick(QTZ_OBC_Ctx *ctx) {}
+QTZ_OBC_OperationResult QTZ_OBC_ParsePacket(QTZ_ByteArray *buffer,
+                                            QTZ_OBC_Packet *p) {
+  if (buffer == NULL || p == NULL) {
+    return QTZ_OBC_RESULT_ERROR;
+  }
+  if (buffer->length < QTZ_OBC_PACKET_LEN) {
+    return QTZ_OBC_RESULT_ERROR;
+  }
+
+  uint8_t *received = QTZ_ByteArray_Current(buffer);
+  memcpy(p, received, QTZ_OBC_PACKET_LEN);
+
+  if (buffer->length == QTZ_OBC_PACKET_LEN) {
+    QTZ_ByteArray_Reset(buffer);
+  } else {
+    size_t diff = buffer->length - QTZ_OBC_PACKET_LEN;
+    memmove(buffer->data, buffer->data + QTZ_OBC_PACKET_LEN, diff);
+    buffer->length = diff;
+  }
+
+  return QTZ_OBC_RESULT_OK;
+}
+
+// Writes the packet to the buffer.
+//
+// Will overwrite all data available in the buffer with the contents of the
+// packet.
+QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
+                                            QTZ_OBC_Packet p) {
+  if (buffer == NULL) {
+    return QTZ_OBC_RESULT_ERROR;
+  }
+  if (buffer->capacity < QTZ_OBC_PACKET_LEN) {
+    return QTZ_OBC_RESULT_ERROR;
+  }
+
+  memcpy(buffer->data, &p, QTZ_OBC_PACKET_LEN);
+  buffer->length = QTZ_OBC_PACKET_LEN;
+
+  return QTZ_OBC_RESULT_OK;
+}
+
+void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
+  if (ctx == NULL || p == NULL) {
+    return;
+  }
+
+  switch (p->cmd_id) {
+  case QTZ_OBC_COMMAND_GOMSPACE_PING: {
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_PING_ACK,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER: {
+    if (ctx->state != QTZ_OBC_STATE_IDLE) {
+      QTZ_Debug_Warning(QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT,
+                        QTZ_OBC_StateToStr(ctx->state),
+                        QTZ_OBC_StateToStr(QTZ_OBC_STATE_HANDOVER_IDLE),
+                        QTZ_OBC_StateToStr(QTZ_OBC_STATE_IDLE));
+      return;
+    }
+    ctx->state = QTZ_OBC_STATE_HANDOVER_IDLE;
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT: {
+    if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
+      QTZ_Debug_Warning(
+          "[%s]: Can't heartbeat when no handover begin has been called!\n",
+          QTZ_OBC_ROUTINE_PREFIX);
+      return;
+    }
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_STATUS: {
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK,
+        .param0 = ctx->state,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_START_TASK: {
+    if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
+      QTZ_Debug_Warning("[%s]: Can't start milo task, OBC is not on handover "
+                        "idle mode! (Current: %s)\n",
+                        QTZ_OBC_ROUTINE_PREFIX, QTZ_OBC_StateToStr(ctx->state));
+      return;
+    }
+    if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_UNSTARTED &&
+        ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_END) {
+      QTZ_Debug_Warning(
+          QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION2_LOG_FMT,
+          QTZ_OBC_StateToStr(ctx->milo_task.state),
+          QTZ_OBC_StateToStr(QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE),
+          QTZ_OBC_StateToStr(QTZ_OBC_MILO_TASK_STATE_UNSTARTED),
+          QTZ_OBC_StateToStr(QTZ_OBC_MILO_TASK_STATE_END));
+      return;
+    }
+    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE;
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+
+    QTZ_OBC_Packet milo_req = {
+        .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_MILO, // Send to MILO.
+        .cmd_id = QTZ_OBC_COMMAND_MILO_PING,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI: {
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI_ACK,
+        .param0 = ctx->milo_task.image_classification,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+  } break;
+  }
+}
+
+QTZ_OBC_TaskCommandHandling QTZ_OBC_MILO_TaskTick(QTZ_OBC_Ctx *ctx,
+                                                  QTZ_OBC_Packet *p) {
+  switch (p->cmd_id) {
+  case QTZ_OBC_COMMAND_MILO_PING_ACK: {
+    if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_BEGIN &&
+        ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_END) {
+      QTZ_Debug_Warning(
+          QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION2_LOG_FMT,
+          QTZ_OBC_MiloTaskToStr(ctx->milo_task.state),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_BEGIN),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_END));
+      return QTZ_OBC_TASK_COMMAND_UNHANDLED;
+    }
+    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE;
+    QTZ_OBC_Packet req = {
+        .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_MILO, // Send to MILO.
+        .cmd_id = QTZ_OBC_COMMAND_MILO_TAKE_PICTURE,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, req);
+  } break;
+  case QTZ_OBC_COMMAND_MILO_TAKE_PICTURE_ACK: {
+    if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE) {
+      QTZ_Debug_Warning(
+          QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT,
+          QTZ_OBC_MiloTaskToStr(ctx->milo_task.state),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_GET_DATA),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE));
+      return QTZ_OBC_TASK_COMMAND_UNHANDLED;
+    }
+    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_GET_DATA;
+    QTZ_OBC_Packet req = {
+        .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_MILO, // Send to MILO.
+        .cmd_id = QTZ_OBC_COMMAND_MILO_PICTURE_CLASI,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, req);
+  } break;
+  case QTZ_OBC_COMMAND_MILO_PICTURE_CLASI_ACK: {
+    if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_GET_DATA) {
+      QTZ_Debug_Warning(
+          QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT,
+          QTZ_OBC_MiloTaskToStr(ctx->milo_task.state),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_END),
+          QTZ_OBC_MiloTaskToStr(QTZ_OBC_MILO_TASK_STATE_GET_DATA));
+      return QTZ_OBC_TASK_COMMAND_UNHANDLED;
+    }
+    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_END;
+    // NOTE: Task has ended, so now we wait for the main OBC to want to retrieve
+    // the result of the operation. We just need to save the operation result.
+    ctx->milo_task.image_classification = p->param0;
+  } break;
+  default:
+    return QTZ_OBC_TASK_COMMAND_UNHANDLED;
+  }
+
+  // If none of the switch case statements above early returned, then the input
+  // has been handled!
+  return QTZ_OBC_TASK_COMMAND_HANDLED;
+}
+
+void QTZ_OBC_HandleSubsystemCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
+  if (QTZ_OBC_TASK_COMMAND_HANDLED == QTZ_OBC_MILO_TaskTick(ctx, p)) {
+    return; // MILO handled the command, so we don't need to check if the other
+            // subsystems should handle it!
+  }
+  // NOTE: Add other tasks for other subsystems...
+}
+
+void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
+  ctx->watchdog_ticks += 1;
+
+  QTZ_OBC_Packet p;
+  if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->i2c.rx, &p)) {
+    QTZ_Debug_Warning("[%s]: No packet received from gomspace! Checking other "
+                      "submodules...\n",
+                      QTZ_OBC_ROUTINE_PREFIX);
+    if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->uart_rs485.rx, &p)) {
+      QTZ_Debug_Warning("[%s]: No packet received from any submodule either! "
+                        "Doing nothing...\n",
+                        QTZ_OBC_ROUTINE_PREFIX);
+      return;
+    }
+  }
+
+  QTZ_Debug_Log(
+      "[%s]: State is `%s`, received command: [%d][%d][%d][%d][%d][%d]\n",
+      QTZ_OBC_ROUTINE_PREFIX, QTZ_OBC_StateToStr(ctx->state), p.protocol_id,
+      p.status, p.subsys, p.cmd_id, p.param0, p.param1);
+
+  if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
+    QTZ_Debug_Log(
+        "[%s]: Ignoring command since it doesn't belong to PortentaH7!\n",
+        QTZ_OBC_ROUTINE_PREFIX);
+    return;
+  }
+
+  switch (p.protocol_id) {
+  case QTZ_OBC_PROTOCOL_HANDOVER: {
+    QTZ_OBC_HandleHandoverCommand(ctx, &p);
+  } break;
+  case QTZ_OBC_PROTOCOL_SUBSYSTEMS: {
+    QTZ_OBC_HandleSubsystemCommand(ctx, &p);
+  } break;
+  }
+}
