@@ -119,6 +119,10 @@ QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
   return QTZ_OBC_RESULT_OK;
 }
 
+// Handle GOMSPACE OBC Command.
+//
+// Main OBC state machine for handling communications between the main OBC and
+// the secondary OBC.
 void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   if (ctx == NULL || p == NULL) {
     return;
@@ -158,8 +162,8 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
       QTZ_Debug_Warning(
-          "[%s]: Can't heartbeat when no handover begin has been called!\n",
-          QTZ_OBC_ROUTINE_PREFIX);
+          "[" QTZ_OBC_ROUTINE_PREFIX
+          "]: Can't heartbeat when no handover begin has been called!\n");
       return;
     }
     QTZ_OBC_Packet resp = {
@@ -179,15 +183,16 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
         .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK,
         .param0 = ctx->state,
-        .param1 = 0,
+        .param1 = ctx->milo_task.state,
     };
     QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_START_TASK: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
-      QTZ_Debug_Warning("[%s]: Can't start milo task, OBC is not on handover "
+      QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
+                        "]: Can't start milo task, OBC is not on handover "
                         "idle mode! (Current: %s)\n",
-                        QTZ_OBC_ROUTINE_PREFIX, QTZ_OBC_StateToStr(ctx->state));
+                        QTZ_OBC_StateToStr(ctx->state));
       return;
     }
     if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_UNSTARTED &&
@@ -290,7 +295,7 @@ QTZ_OBC_TaskCommandHandling QTZ_OBC_MILO_TaskTick(QTZ_OBC_Ctx *ctx,
       return QTZ_OBC_TASK_COMMAND_UNHANDLED;
     }
     ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_END;
-    // NOTE: Task has ended, so now we wait for the main OBC to want to retrieve
+    // Task has ended, so now we wait for the main OBC to want to retrieve
     // the result of the operation. We just need to save the operation result.
     ctx->milo_task.image_classification = p->param0;
   } break;
@@ -316,26 +321,27 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
 
   QTZ_OBC_Packet p;
   if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->i2c.rx, &p)) {
-    QTZ_Debug_Warning("[%s]: No packet received from gomspace! Checking other "
-                      "submodules...\n",
-                      QTZ_OBC_ROUTINE_PREFIX);
+    QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
+                      "]: No packet received from gomspace! Checking other "
+                      "submodules...\n");
     if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->uart_rs485.rx, &p)) {
-      QTZ_Debug_Warning("[%s]: No packet received from any submodule either! "
-                        "Doing nothing...\n",
-                        QTZ_OBC_ROUTINE_PREFIX);
+      QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
+                        "]: No packet received from any submodule either! "
+                        "Doing nothing...\n");
       return;
     }
   }
 
   QTZ_Debug_Log(
-      "[%s]: State is `%s`, received command: [%d][%d][%d][%d][%d][%d]\n",
-      QTZ_OBC_ROUTINE_PREFIX, QTZ_OBC_StateToStr(ctx->state), p.protocol_id,
-      p.status, p.subsys, p.cmd_id, p.param0, p.param1);
+      "[" QTZ_OBC_ROUTINE_PREFIX
+      "]: State is `%s`, received command: [%d][%d][%d][%d][%d][%d]\n",
+      QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status, p.subsys,
+      p.cmd_id, p.param0, p.param1);
 
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
     QTZ_Debug_Log(
-        "[%s]: Ignoring command since it doesn't belong to PortentaH7!\n",
-        QTZ_OBC_ROUTINE_PREFIX);
+        "[" QTZ_OBC_ROUTINE_PREFIX
+        "]: Ignoring command since it doesn't belong to PortentaH7!\n");
     return;
   }
 
