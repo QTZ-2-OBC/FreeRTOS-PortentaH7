@@ -347,6 +347,28 @@ void test_QTZ_HandoverInit() {
       }));
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
   TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_END, ctx.milo_task.state);
+
+  TEST_ASSERT_OBC_COMMAND(
+      ctx, expected, ctx.i2c.rx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER,
+          .param0 = 0,
+          .param1 = 0,
+      }),
+      ctx.i2c.tx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER_ACK,
+          .param0 = 0,
+          .param1 = 0,
+      }));
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_END, ctx.milo_task.state);
 }
 
 int main(void) {

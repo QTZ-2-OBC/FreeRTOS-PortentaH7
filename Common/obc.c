@@ -101,6 +101,11 @@ char *QTZ_OBC_CommandToStr(QTZ_OBC_Command cmd) {
     return "PICTURE_CLASI";
   case QTZ_OBC_COMMAND_MILO_PICTURE_CLASI_ACK:
     return "PICTURE_CLASI_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER:
+    return "ABORT_HANDOVER";
+  case QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER_ACK:
+    return "ABORT_HANDOVER_ACK";
+    break;
   }
 }
 
@@ -287,6 +292,26 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
         .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI_ACK,
         .param0 = ctx->milo_task.image_classification,
+        .param1 = 0,
+    };
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
+  } break;
+  case QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER: {
+    if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
+      QTZ_Debug_Warning(QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT,
+                        QTZ_OBC_StateToStr(ctx->state),
+                        QTZ_OBC_StateToStr(QTZ_OBC_STATE_IDLE),
+                        QTZ_OBC_StateToStr(QTZ_OBC_STATE_HANDOVER_IDLE));
+      return;
+    }
+
+    ctx->state = QTZ_OBC_STATE_IDLE;
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_ABORT_HANDOVER_ACK,
+        .param0 = 0,
         .param1 = 0,
     };
     QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
