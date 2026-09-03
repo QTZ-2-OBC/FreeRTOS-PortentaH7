@@ -56,6 +56,47 @@ char *QTZ_OBC_MiloTaskToStr(int variant) {
   }
 }
 
+char *QTZ_OBC_CommandToStr(QTZ_OBC_Command cmd) {
+  switch (cmd) {
+  case QTZ_OBC_COMMAND_GOMSPACE_PING:
+    return "PING";
+  case QTZ_OBC_COMMAND_GOMSPACE_PING_ACK:
+    return "PING_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER:
+    return "BEGIN_HANDOVER";
+  case QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK:
+    return "HANDOVER_BEGIN_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT:
+    return "HEARTBEAT";
+  case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK:
+    return "HEARTBEAT_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_STATUS:
+    return "STATUS";
+  case QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK:
+    return "STATUS_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_START_TASK:
+    return "START_TASK";
+  case QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK:
+    return "START_TASK_ACK";
+  case QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI:
+    return "GET_IMAGE_CLASI";
+  case QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI_ACK:
+    return "GET_IMAGE_CLASI_ACK";
+  case QTZ_OBC_COMMAND_MILO_PING:
+    return "PING";
+  case QTZ_OBC_COMMAND_MILO_PING_ACK:
+    return "PING_ACK";
+  case QTZ_OBC_COMMAND_MILO_TAKE_PICTURE:
+    return "TAKE_PICTURE";
+  case QTZ_OBC_COMMAND_MILO_TAKE_PICTURE_ACK:
+    return "TAKE_PICTURE_ACK";
+  case QTZ_OBC_COMMAND_MILO_PICTURE_CLASI:
+    return "PICTURE_CLASI";
+  case QTZ_OBC_COMMAND_MILO_PICTURE_CLASI_ACK:
+    return "PICTURE_CLASI_ACK";
+  }
+}
+
 // ================
 // -- Public API --
 // ================
@@ -122,9 +163,9 @@ QTZ_OBC_OperationResult QTZ_OBC_RespondWithPacket(QTZ_OBC_Ctx *ctx,
                                                   QTZ_ByteArray *buffer,
                                                   QTZ_OBC_Packet p) {
   QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
-                "]: State is `%s`, responding with: [%c][%d][%c][%d][%d][%d]\n",
+                "]: State is `%s`, responding with: [%c][%d][%c][%s][%d][%d]\n",
                 QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,
-                p.subsys, p.cmd_id, p.param0, p.param1);
+                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
   return QTZ_OBC_WritePacket(buffer, p);
 }
 
@@ -343,9 +384,9 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
 
   QTZ_Debug_Log(
       "[" QTZ_OBC_ROUTINE_PREFIX
-      "]: State is `%s`, received command: [%c][%d][%c][%d][%d][%d]\n",
+      "]: State is `%s`, received command: [%c][%d][%c][%s][%d][%d]\n",
       QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status, p.subsys,
-      p.cmd_id, p.param0, p.param1);
+      QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
 
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
     QTZ_Debug_Log(
