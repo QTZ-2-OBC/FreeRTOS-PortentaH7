@@ -119,8 +119,6 @@ void TEST_ASSERT_OBC_COMMAND(QTZ_OBC_Ctx *ctx, QTZ_ByteArray *expected,
   TEST_ASSERT_EQUAL(QTZ_OBC_RESULT_OK,
                     QTZ_OBC_WritePacket(expected, exp_packet));
   TEST_ASSERT_EQUAL_MEMORY(expected->data, resp_arr->data, expected->length);
-  // TEST_ASSERT_EQUAL_STRING_LEN(expected->data, resp_arr->data,
-  //                              expected->length);
 
   QTZ_ByteArray_Reset(expected);
   CLEAN_OBC_BUFFERS(ctx);
@@ -174,6 +172,13 @@ void test_QTZ_HandoverInit() {
   TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+
+  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK;
+  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK;
+  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+                          exp_packet);
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_BEGIN, ctx.milo_task.state);
 }
 
 int main(void) {
