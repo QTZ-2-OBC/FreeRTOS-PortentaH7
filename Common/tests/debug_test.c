@@ -10,17 +10,17 @@ void QTZ_Debug_Print() {}
 
 void test_QTZ_Format() {
   QTZ_Debug_Log("VALUE IS: %d", 25);
-  char *expected = "LOG: VALUE IS: 25";
+  char *expected = "debug_test.c:12 [LOG] VALUE IS: 25";
   TEST_ASSERT_EQUAL_STRING_LEN(expected, __DEBUG_INNER_BUFFER,
                                strlen(expected));
 
   QTZ_Debug_Warning("THE ARR IS: %s", "hola!");
-  expected = "WAR: THE ARR IS: hola!";
+  expected = "debug_test.c:17 [WAR] THE ARR IS: hola!";
   TEST_ASSERT_EQUAL_STRING_LEN(expected, __DEBUG_INNER_BUFFER,
                                strlen(expected));
 
   QTZ_Debug_Error("The length is: %lu!", 512);
-  expected = "ERR: The length is: 512!";
+  expected = "debug_test.c:22 [ERR] The length is: 512!";
   TEST_ASSERT_EQUAL_STRING_LEN(expected, __DEBUG_INNER_BUFFER,
                                strlen(expected));
 }
@@ -49,7 +49,8 @@ void test_QTZ_Format() {
 
 void test_QTZ_Format_Length() {
   QTZ_Debug_Log("The file contents are: %s", QTZ_LONG_STRING);
-  char *expected = "LOG: The file contents are: " QTZ_LONG_STRING;
+  char *expected =
+      "debug_test.c:51 [LOG] The file contents are: " QTZ_LONG_STRING;
   TEST_ASSERT_EQUAL_STRING_LEN(expected, __DEBUG_INNER_BUFFER,
                                QTZ_DEBUG_CAPACITY -
                                    1); // -1 because of the null terminator

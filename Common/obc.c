@@ -159,15 +159,12 @@ QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
   return QTZ_OBC_RESULT_OK;
 }
 
-QTZ_OBC_OperationResult QTZ_OBC_RespondWithPacket(QTZ_OBC_Ctx *ctx,
-                                                  QTZ_ByteArray *buffer,
-                                                  QTZ_OBC_Packet p) {
-  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
-                "]: State is `%s`, responding with: [%c][%d][%c][%s][%d][%d]\n",
-                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,
-                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
-  return QTZ_OBC_WritePacket(buffer, p);
-}
+#define QTZ_OBC_RespondWithPacket(ctx, buffer, p)                              \
+  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX                                     \
+                "]: State is `%s`, responding with: [%c][%d][%c][%s][%d][%d]", \
+                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,       \
+                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1); \
+  QTZ_OBC_WritePacket(buffer, p);
 
 // Handle GOMSPACE OBC Command.
 //
@@ -382,16 +379,14 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
     }
   }
 
-  QTZ_Debug_Log(
-      "[" QTZ_OBC_ROUTINE_PREFIX
-      "]: State is `%s`, received command: [%c][%d][%c][%s][%d][%d]\n",
-      QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status, p.subsys,
-      QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
+  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
+                "]: State is `%s`, received command: [%c][%d][%c][%s][%d][%d]",
+                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,
+                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
 
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
-    QTZ_Debug_Log(
-        "[" QTZ_OBC_ROUTINE_PREFIX
-        "]: Ignoring command since it doesn't belong to PortentaH7!\n");
+    QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
+                  "]: Ignoring command since it doesn't belong to PortentaH7!");
     return;
   }
 
