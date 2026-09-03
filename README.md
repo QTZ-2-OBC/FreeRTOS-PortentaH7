@@ -139,7 +139,7 @@ for file in *.c; do
     printf "Testing: %s\n" "$file"
     printf "================================================\n"
     set -x
-    gcc ../../deps/**/*.o "$file" -lm -o test.bin
+    gcc ../../deps/**/*.o "$file" -lm -DQTZ_DEBUG -g -o test.bin
     ./test.bin
     set +x
 done
