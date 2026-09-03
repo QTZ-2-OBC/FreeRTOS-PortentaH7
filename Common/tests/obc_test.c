@@ -8,8 +8,8 @@
 // Comment out the implementation if the logs become to much...
 extern uint8_t __DEBUG_INNER_BUFFER[QTZ_DEBUG_CAPACITY];
 void QTZ_Debug_Print() {
-  // uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
-  // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
+  uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
+  printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
 }
 
 void setUp() {}
@@ -103,26 +103,18 @@ void CLEAN_OBC_BUFFERS(QTZ_OBC_Ctx *ctx) {
   QTZ_ByteArray_Reset(&ctx->uart_rs485.rx);
 }
 
-void TEST_ASSERT_OBC_COMMAND(QTZ_OBC_Ctx *ctx, QTZ_ByteArray *expected,
-                             QTZ_ByteArray *req_arr, QTZ_OBC_Packet req,
-                             QTZ_ByteArray *resp_arr,
-                             QTZ_OBC_Packet exp_packet) {
-  TEST_ASSERT_NOT_NULL(ctx);
-  TEST_ASSERT_NOT_NULL(expected);
-  TEST_ASSERT_NOT_NULL(req_arr);
-  TEST_ASSERT_NOT_NULL(resp_arr);
-
-  TEST_ASSERT_EQUAL(QTZ_OBC_RESULT_OK, QTZ_OBC_WritePacket(req_arr, req));
-  TEST_ASSERT_EQUAL(QTZ_OBC_PACKET_LEN, req_arr->length);
-
-  QTZ_OBC_Routine_Tick(ctx);
-  TEST_ASSERT_EQUAL(QTZ_OBC_RESULT_OK,
-                    QTZ_OBC_WritePacket(expected, exp_packet));
-  TEST_ASSERT_EQUAL_MEMORY(expected->data, resp_arr->data, expected->length);
-
-  QTZ_ByteArray_Reset(expected);
-  CLEAN_OBC_BUFFERS(ctx);
-}
+#define TEST_ASSERT_OBC_COMMAND(ctx, expected, req_arr, req, resp_arr,         \
+                                exp_packet)                                    \
+  TEST_ASSERT_EQUAL(QTZ_OBC_RESULT_OK, QTZ_OBC_WritePacket(&req_arr, req));    \
+  TEST_ASSERT_EQUAL(QTZ_OBC_PACKET_LEN, req_arr.length);                       \
+                                                                               \
+  QTZ_OBC_Routine_Tick(&ctx);                                                  \
+  TEST_ASSERT_EQUAL(QTZ_OBC_RESULT_OK,                                         \
+                    QTZ_OBC_WritePacket(&expected, exp_packet));               \
+  TEST_ASSERT_EQUAL_MEMORY(expected.data, resp_arr.data, expected.length);     \
+                                                                               \
+  QTZ_ByteArray_Reset(&expected);                                              \
+  CLEAN_OBC_BUFFERS(&ctx);
 
 void test_QTZ_HandoverInit() {
   QTZ_INITIALIZE_OBC(ctx);
@@ -143,25 +135,25 @@ void test_QTZ_HandoverInit() {
       .param0 = 0,
       .param1 = 0,
   };
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_IDLE, ctx.state);
 
   req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER;
   exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK;
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
   req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT;
   exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK;
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
   req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT;
   exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK;
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
@@ -169,13 +161,13 @@ void test_QTZ_HandoverInit() {
   exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK;
   exp_packet.param0 = QTZ_OBC_STATE_HANDOVER_IDLE;
   exp_packet.param1 = QTZ_OBC_MILO_TASK_STATE_UNSTARTED;
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
   req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK;
   exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK;
-  TEST_ASSERT_OBC_COMMAND(&ctx, &expected, &ctx.i2c.rx, req, &ctx.i2c.tx,
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
                           exp_packet);
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
   TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_BEGIN, ctx.milo_task.state);

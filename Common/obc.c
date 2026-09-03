@@ -118,6 +118,16 @@ QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
   return QTZ_OBC_RESULT_OK;
 }
 
+QTZ_OBC_OperationResult QTZ_OBC_RespondWithPacket(QTZ_OBC_Ctx *ctx,
+                                                  QTZ_ByteArray *buffer,
+                                                  QTZ_OBC_Packet p) {
+  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
+                "]: State is `%s`, responding with: [%c][%d][%c][%d][%d][%d]\n",
+                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,
+                p.subsys, p.cmd_id, p.param0, p.param1);
+  return QTZ_OBC_WritePacket(buffer, p);
+}
+
 // Handle GOMSPACE OBC Command.
 //
 // Main OBC state machine for handling communications between the main OBC and
@@ -137,7 +147,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER: {
     if (ctx->state != QTZ_OBC_STATE_IDLE) {
@@ -156,7 +166,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
@@ -173,7 +183,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_STATUS: {
     QTZ_OBC_Packet resp = {
@@ -184,7 +194,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = ctx->state,
         .param1 = ctx->milo_task.state,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_START_TASK: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
@@ -213,7 +223,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
 
     QTZ_OBC_Packet milo_req = {
         .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
@@ -223,7 +233,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, resp);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI: {
     QTZ_OBC_Packet resp = {
@@ -234,7 +244,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = ctx->milo_task.image_classification,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->i2c.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->i2c.tx, resp);
   } break;
   }
 }
@@ -262,7 +272,7 @@ QTZ_OBC_TaskCommandHandling QTZ_OBC_MILO_TaskTick(QTZ_OBC_Ctx *ctx,
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, req);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, req);
   } break;
   case QTZ_OBC_COMMAND_MILO_TAKE_PICTURE_ACK: {
     if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE) {
@@ -282,7 +292,7 @@ QTZ_OBC_TaskCommandHandling QTZ_OBC_MILO_TaskTick(QTZ_OBC_Ctx *ctx,
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_WritePacket(&ctx->uart_rs485.tx, req);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, req);
   } break;
   case QTZ_OBC_COMMAND_MILO_PICTURE_CLASI_ACK: {
     if (ctx->milo_task.state != QTZ_OBC_MILO_TASK_STATE_GET_DATA) {
