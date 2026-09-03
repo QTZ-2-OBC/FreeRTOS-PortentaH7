@@ -8,8 +8,8 @@
 // Comment out the implementation if the logs become to much...
 extern uint8_t __DEBUG_INNER_BUFFER[QTZ_DEBUG_CAPACITY];
 void QTZ_Debug_Print() {
-  uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
-  printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
+  // uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
+  // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
 }
 
 void setUp() {}
@@ -116,61 +116,237 @@ void CLEAN_OBC_BUFFERS(QTZ_OBC_Ctx *ctx) {
   QTZ_ByteArray_Reset(&expected);                                              \
   CLEAN_OBC_BUFFERS(&ctx);
 
+static inline QTZ_OBC_Packet mkPacket(QTZ_OBC_Packet p) { return p; }
+
 void test_QTZ_HandoverInit() {
   QTZ_INITIALIZE_OBC(ctx);
 
-  QTZ_OBC_Packet req = {
-      .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
-      .status = QTZ_OBC_RESULT_OK,
-      .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
-      .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_PING,
-      .param0 = 0,
-      .param1 = 0,
-  };
-  QTZ_OBC_Packet exp_packet = {
-      .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
-      .status = QTZ_OBC_RESULT_OK,
-      .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
-      .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_PING_ACK,
-      .param0 = 0,
-      .param1 = 0,
-  };
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_PING,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.i2c.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_PING_ACK,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }));
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_IDLE, ctx.state);
 
-  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER;
-  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK;
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
+  TEST_ASSERT_OBC_COMMAND(
+      ctx, expected, ctx.i2c.rx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER,
+          .param0 = 0,
+          .param1 = 0,
+      }),
+      ctx.i2c.tx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER_ACK,
+          .param0 = 0,
+          .param1 = 0,
+      }));
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
-  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT;
-  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK;
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
+  for (int i = 0; i < 2; i++) {
+    TEST_ASSERT_OBC_COMMAND(
+        ctx, expected, ctx.i2c.rx,
+        mkPacket((QTZ_OBC_Packet){
+            .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+            .status = QTZ_OBC_RESULT_OK,
+            .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+            .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT,
+            .param0 = 0,
+            .param1 = 0,
+        }),
+        ctx.i2c.tx,
+        mkPacket((QTZ_OBC_Packet){
+            .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+            .status = QTZ_OBC_RESULT_OK,
+            .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+            .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK,
+            .param0 = 0,
+            .param1 = 0,
+        }));
+    TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  }
+
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.i2c.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK,
+                              .param0 = QTZ_OBC_STATE_HANDOVER_IDLE,
+                              .param1 = QTZ_OBC_MILO_TASK_STATE_UNSTARTED,
+                          }));
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
 
-  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT;
-  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT_ACK;
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
-  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
-
-  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS;
-  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK;
-  exp_packet.param0 = QTZ_OBC_STATE_HANDOVER_IDLE;
-  exp_packet.param1 = QTZ_OBC_MILO_TASK_STATE_UNSTARTED;
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
-  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
-
-  req.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK;
-  exp_packet.cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK;
-  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx, req, ctx.i2c.tx,
-                          exp_packet);
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.i2c.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_START_TASK_ACK,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }));
   TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
   TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_BEGIN, ctx.milo_task.state);
+
+  // -- Check if MILO command was sent
+  TEST_ASSERT_EQUAL(
+      QTZ_OBC_RESULT_OK,
+      QTZ_OBC_WritePacket(&expected,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_MILO,
+                              .cmd_id = QTZ_OBC_COMMAND_MILO_PING,
+                              .param0 = 0,
+                              .param1 = 0,
+                          })));
+  TEST_ASSERT_EQUAL_MEMORY(expected.data, ctx.uart_rs485.tx.data,
+                           expected.length);
+
+  // -- Emulate MILO answer
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.uart_rs485.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_MILO_PING_ACK,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.uart_rs485.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_MILO,
+                              .cmd_id = QTZ_OBC_COMMAND_MILO_TAKE_PICTURE,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }));
+
+  // -- Emulate MILO answer
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.uart_rs485.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_MILO_TAKE_PICTURE_ACK,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.uart_rs485.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_MILO,
+                              .cmd_id = QTZ_OBC_COMMAND_MILO_PICTURE_CLASI,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }));
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_GET_DATA, ctx.milo_task.state);
+
+  // Delete all data from the uart tx buffer.
+  // This command doesn't need a response from portenta.
+  TEST_ASSERT_EQUAL(
+      QTZ_OBC_RESULT_OK,
+      QTZ_OBC_WritePacket(&ctx.uart_rs485.tx, mkPacket((QTZ_OBC_Packet){})));
+  TEST_ASSERT_OBC_COMMAND(
+      ctx, expected, ctx.uart_rs485.rx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+          .cmd_id = QTZ_OBC_COMMAND_MILO_PICTURE_CLASI_ACK,
+          .param0 = QTZ_OBC_MILO_IMAGE_CLASSIFICATION_HIGH,
+          .param1 = 0,
+      }),
+      ctx.uart_rs485.tx,
+      mkPacket((QTZ_OBC_Packet){
+          // This packet doesn't matter, no answer is given from portenta
+      }));
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_END, ctx.milo_task.state);
+
+  TEST_ASSERT_OBC_COMMAND(ctx, expected, ctx.i2c.rx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS,
+                              .param0 = 0,
+                              .param1 = 0,
+                          }),
+                          ctx.i2c.tx,
+                          mkPacket((QTZ_OBC_Packet){
+                              .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+                              .status = QTZ_OBC_RESULT_OK,
+                              .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+                              .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_STATUS_ACK,
+                              .param0 = ctx.state,
+                              .param1 = ctx.milo_task.state,
+                          }));
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_END, ctx.milo_task.state);
+
+  TEST_ASSERT_OBC_COMMAND(
+      ctx, expected, ctx.i2c.rx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI,
+          .param0 = 0,
+          .param1 = 0,
+      }),
+      ctx.i2c.tx,
+      mkPacket((QTZ_OBC_Packet){
+          .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
+          .status = QTZ_OBC_RESULT_OK,
+          .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE,
+          .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI_ACK,
+          .param0 = ctx.milo_task.image_classification,
+          .param1 = 0,
+      }));
+  TEST_ASSERT_EQUAL(QTZ_OBC_STATE_HANDOVER_IDLE, ctx.state);
+  TEST_ASSERT_EQUAL(QTZ_OBC_MILO_TASK_STATE_END, ctx.milo_task.state);
 }
 
 int main(void) {

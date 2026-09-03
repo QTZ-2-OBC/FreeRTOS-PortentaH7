@@ -12,6 +12,13 @@
   "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
   "]: Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`"
 
+#define QTZ_OBC_RECEIVED_COMMAND_FMT                                           \
+  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
+  "]: State: [%-25s][%-25s], received command: [%c][%d][%c][%-20s][%d][%d]"
+#define QTZ_OBC_SENDING_COMMAND_FMT                                            \
+  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
+  "]: State: [%-25s][%-25s], sending  command: [%c][%d][%c][%-20s][%d][%d]"
+
 // -- I2C --
 uint8_t i2c_rx_buffer[QTZ_OBC_I2C_RX_LEN];
 uint8_t i2c_tx_buffer[QTZ_OBC_I2C_TX_LEN];
@@ -64,7 +71,7 @@ char *QTZ_OBC_CommandToStr(QTZ_OBC_Command cmd) {
     return "PING_ACK";
   case QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER:
     return "BEGIN_HANDOVER";
-  case QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK:
+  case QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER_ACK:
     return "HANDOVER_BEGIN_ACK";
   case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT:
     return "HEARTBEAT";
@@ -160,10 +167,10 @@ QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
 }
 
 #define QTZ_OBC_RespondWithPacket(ctx, buffer, p)                              \
-  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX                                     \
-                "]: State is `%s`, responding with: [%c][%d][%c][%s][%d][%d]", \
-                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,       \
-                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1); \
+  QTZ_Debug_Log(QTZ_OBC_SENDING_COMMAND_FMT, QTZ_OBC_StateToStr(ctx->state),   \
+                QTZ_OBC_MiloTaskToStr(ctx->milo_task.state), p.protocol_id,    \
+                p.status, p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0,  \
+                p.param1);                                                     \
   QTZ_OBC_WritePacket(buffer, p);
 
 // Handle GOMSPACE OBC Command.
@@ -200,7 +207,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
         .status = QTZ_OBC_RESULT_OK,
         .subsys = QTZ_OBC_SUBSYSTEM_GOMSPACE, // Send to gomspace.
-        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_HANDOVER_BEGIN_ACK,
+        .cmd_id = QTZ_OBC_COMMAND_GOMSPACE_BEGIN_HANDOVER_ACK,
         .param0 = 0,
         .param1 = 0,
     };
@@ -252,7 +259,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
           QTZ_OBC_StateToStr(QTZ_OBC_MILO_TASK_STATE_END));
       return;
     }
-    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_TAKE_PICTURE;
+    ctx->milo_task.state = QTZ_OBC_MILO_TASK_STATE_BEGIN;
     QTZ_OBC_Packet resp = {
         .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
         .status = QTZ_OBC_RESULT_OK,
@@ -271,7 +278,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
         .param0 = 0,
         .param1 = 0,
     };
-    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, resp);
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, milo_req);
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_GET_IMAGE_CLASI: {
     QTZ_OBC_Packet resp = {
@@ -379,10 +386,10 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
     }
   }
 
-  QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
-                "]: State is `%s`, received command: [%c][%d][%c][%s][%d][%d]",
-                QTZ_OBC_StateToStr(ctx->state), p.protocol_id, p.status,
-                p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0, p.param1);
+  QTZ_Debug_Log(QTZ_OBC_RECEIVED_COMMAND_FMT, QTZ_OBC_StateToStr(ctx->state),
+                QTZ_OBC_MiloTaskToStr(ctx->milo_task.state), p.protocol_id,
+                p.status, p.subsys, QTZ_OBC_CommandToStr(p.cmd_id), p.param0,
+                p.param1);
 
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
     QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
