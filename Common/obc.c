@@ -6,11 +6,11 @@
 #define QTZ_OBC_ROUTINE_PREFIX "OBC-MR"
 #define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT                          \
   "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: Can't transition from `%s` -> `%s`. State should be: `%s`\n"
+  "]: Can't transition from `%s` -> `%s`. State should be: `%s`"
 
 #define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION2_LOG_FMT                         \
   "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`\n"
+  "]: Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`"
 
 // -- I2C --
 uint8_t i2c_rx_buffer[QTZ_OBC_I2C_RX_LEN];
@@ -238,7 +238,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
       QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
                         "]: Can't start milo task, OBC is not on handover "
-                        "idle mode! (Current: %s)\n",
+                        "idle mode! (Current: %s)",
                         QTZ_OBC_StateToStr(ctx->state));
       return;
     }
@@ -370,11 +370,11 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
   if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->i2c.rx, &p)) {
     QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
                       "]: No packet received from gomspace! Checking other "
-                      "submodules...\n");
+                      "submodules...");
     if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->uart_rs485.rx, &p)) {
       QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
                         "]: No packet received from any submodule either! "
-                        "Doing nothing...\n");
+                        "Doing nothing...");
       return;
     }
   }
