@@ -163,4 +163,21 @@ QTZ_OBC_OperationResult QTZ_OBC_ParsePacket(QTZ_ByteArray *buffer,
 QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
                                             QTZ_OBC_Packet p);
 
+// Begins a critical section.
+// No interrupts can happen, and no other thread can enter.
+void QTZ_OBC_BeginCritical(void);
+
+// Ends a critical section.
+void QTZ_OBC_EndCritical(void);
+
+// Arms a message to be sent through RS485.
+//
+// This functions asssumes it works with interrupts.
+QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg);
+
+// Arms a message to be sent through I2C.
+//
+// This functions asssumes it works with interrupts.
+QTZ_OBC_OperationResult QTZ_OBC_SendI2C_IT(QTZ_ByteArray *msg);
+
 #endif

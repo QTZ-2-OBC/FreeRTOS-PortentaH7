@@ -3,7 +3,6 @@
 #include "../debug.c"
 #include "../obc.c"
 #include "../obc_submodules_sdk.c"
-#include <stdio.h>
 
 // =======================================
 // BEGIN STUB IMPLEMENTATIONS
@@ -16,6 +15,14 @@ void QTZ_Debug_Print() {
   // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
 }
 void QTZ_OBC_ArmInterrupts() {}
+void QTZ_OBC_BeginCritical() {};
+void QTZ_OBC_EndCritical() {};
+QTZ_OBC_OperationResult QTZ_OBC_SendI2C_IT(QTZ_ByteArray *msg) {
+  return QTZ_OBC_RESULT_OK;
+};
+QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg) {
+  return QTZ_OBC_RESULT_OK;
+};
 // =======================================
 // END STUB IMPLEMENTATIONS
 // =======================================

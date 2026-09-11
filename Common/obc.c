@@ -2,21 +2,21 @@
 #include "include/debug.h"
 #include <string.h>
 
-#define QTZ_OBC_ROUTINE_PREFIX "OBC-MR"
+#define QTZ_OBC_ROUTINE_PREFIX "[OBC-MR]: "
 #define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION_LOG_FMT                          \
-  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: Can't transition from `%s` -> `%s`. State should be: `%s`"
+  QTZ_OBC_ROUTINE_PREFIX                                                       \
+  "Can't transition from `%s` -> `%s`. State should be: `%s`"
 
 #define QTZ_OBC_STATE_MACHINE_FAIL_TRANSITION2_LOG_FMT                         \
-  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`"
+  QTZ_OBC_ROUTINE_PREFIX                                                       \
+  "Can't transition from `%s` -> `%s`. State should be: `%s` or `%s`"
 
 #define QTZ_OBC_RECEIVED_COMMAND_FMT                                           \
-  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: State: [%-25s][%-25s], received command: [%c][%d][%c][%-20s][%d][%d]"
+  QTZ_OBC_ROUTINE_PREFIX                                                       \
+  "State: [%-25s][%-25s], received command: [%c][%d][%c][%-20s][%d][%d]"
 #define QTZ_OBC_SENDING_COMMAND_FMT                                            \
-  "[" QTZ_OBC_ROUTINE_PREFIX                                                   \
-  "]: State: [%-25s][%-25s], sending  command: [%c][%d][%c][%-20s][%d][%d]"
+  QTZ_OBC_ROUTINE_PREFIX                                                       \
+  "State: [%-25s][%-25s], sending  command: [%c][%d][%c][%-20s][%d][%d]"
 
 QTZ_OBC_Ctx GLOBAL_CTX;
 
@@ -102,8 +102,8 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   case QTZ_OBC_COMMAND_GOMSPACE_HEARTBEAT: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
       QTZ_Debug_Warning(
-          "[" QTZ_OBC_ROUTINE_PREFIX
-          "]: Can't heartbeat when no handover begin has been called!\n");
+          QTZ_OBC_ROUTINE_PREFIX
+          "Can't heartbeat when no handover begin has been called!\n");
       return;
     }
     QTZ_OBC_Packet resp = {
@@ -129,8 +129,8 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   } break;
   case QTZ_OBC_COMMAND_GOMSPACE_START_TASK: {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
-      QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
-                        "]: Can't start milo task, OBC is not on handover "
+      QTZ_Debug_Warning(QTZ_OBC_ROUTINE_PREFIX
+                        "Can't start milo task, OBC is not on handover "
                         "idle mode! (Current: %s)",
                         QTZ_OBC_StateToStr(ctx->state));
       return;
@@ -281,12 +281,12 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
 
   QTZ_OBC_Packet p;
   if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->i2c.rx, &p)) {
-    QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
-                      "]: No packet received from gomspace! Checking other "
+    QTZ_Debug_Warning(QTZ_OBC_ROUTINE_PREFIX
+                      "No packet received from gomspace! Checking other "
                       "submodules...");
     if (QTZ_OBC_RESULT_OK != QTZ_OBC_ParsePacket(&ctx->uart_rs485.rx, &p)) {
-      QTZ_Debug_Warning("[" QTZ_OBC_ROUTINE_PREFIX
-                        "]: No packet received from any submodule either! "
+      QTZ_Debug_Warning(QTZ_OBC_ROUTINE_PREFIX
+                        "No packet received from any submodule either! "
                         "Doing nothing...");
       return;
     }
@@ -298,8 +298,8 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
                 p.param1);
 
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
-    QTZ_Debug_Log("[" QTZ_OBC_ROUTINE_PREFIX
-                  "]: Ignoring command since it doesn't belong to PortentaH7!");
+    QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX
+                  "Ignoring command since it doesn't belong to PortentaH7!");
     return;
   }
 
@@ -310,5 +310,21 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
   case QTZ_OBC_PROTOCOL_SUBSYSTEMS: {
     QTZ_OBC_HandleSubsystemCommand(ctx, &p);
   } break;
+  }
+
+  if (ctx->i2c.tx.length != 0) {
+    if (QTZ_OBC_RESULT_OK != QTZ_OBC_SendI2C_IT(&ctx->i2c.tx)) {
+      QTZ_Debug_Error(QTZ_OBC_ROUTINE_PREFIX
+                      "Failed to arm the I2C msg transmission!");
+      ctx->state = QTZ_OBC_STATE_ERROR;
+    }
+  }
+
+  if (ctx->uart_rs485.tx.length != 0) {
+    if (QTZ_OBC_RESULT_OK != QTZ_OBC_SendRS485_IT(&ctx->uart_rs485.tx)) {
+      QTZ_Debug_Error(QTZ_OBC_ROUTINE_PREFIX
+                      "Failed to arm the RS485 msg transmission!");
+      ctx->state = QTZ_OBC_STATE_ERROR;
+    }
   }
 }

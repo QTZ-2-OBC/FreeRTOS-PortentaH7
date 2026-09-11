@@ -95,21 +95,17 @@ QTZ_OBC_OperationResult QTZ_OBC_ParsePacket(QTZ_ByteArray *buffer,
     return QTZ_OBC_RESULT_ERROR;
   }
 
-  if (buffer->length < QTZ_OBC_PACKET_LEN) {
-    return QTZ_OBC_RESULT_ERROR;
+  QTZ_OBC_OperationResult result = QTZ_OBC_RESULT_ERROR;
+
+  QTZ_OBC_BeginCritical();
+  if (buffer->length >= QTZ_OBC_PACKET_LEN) {
+    memcpy(p, buffer->data, QTZ_OBC_PACKET_LEN);
+    QTZ_ByteArray_Reset(buffer);
+    result = QTZ_OBC_RESULT_OK;
   }
-  memcpy(p, buffer->data, QTZ_OBC_PACKET_LEN);
-  QTZ_ByteArray_Reset(buffer);
+  QTZ_OBC_EndCritical();
 
-  // if (buffer->length == QTZ_OBC_PACKET_LEN) {
-  //   QTZ_ByteArray_Reset(buffer);
-  // } else {
-  //   size_t diff = buffer->length - QTZ_OBC_PACKET_LEN;
-  //   memmove(buffer->data, buffer->data + QTZ_OBC_PACKET_LEN, diff);
-  //   buffer->length = diff;
-  // }
-
-  return QTZ_OBC_RESULT_OK;
+  return result;
 }
 
 // Writes the packet to the buffer.
@@ -121,12 +117,16 @@ QTZ_OBC_OperationResult QTZ_OBC_WritePacket(QTZ_ByteArray *buffer,
   if (buffer == NULL) {
     return QTZ_OBC_RESULT_ERROR;
   }
-  if (buffer->capacity < QTZ_OBC_PACKET_LEN) {
-    return QTZ_OBC_RESULT_ERROR;
+
+  QTZ_OBC_OperationResult result = QTZ_OBC_RESULT_ERROR;
+
+  QTZ_OBC_BeginCritical();
+  if (buffer->capacity >= QTZ_OBC_PACKET_LEN) {
+    memcpy(buffer->data, &p, QTZ_OBC_PACKET_LEN);
+    buffer->length = QTZ_OBC_PACKET_LEN;
+    result = QTZ_OBC_RESULT_OK;
   }
+  QTZ_OBC_EndCritical();
 
-  memcpy(buffer->data, &p, QTZ_OBC_PACKET_LEN);
-  buffer->length = QTZ_OBC_PACKET_LEN;
-
-  return QTZ_OBC_RESULT_OK;
+  return result;
 }

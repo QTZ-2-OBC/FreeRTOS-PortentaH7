@@ -41,23 +41,7 @@ void MX_MainRoutine(void *argument) {
   (void)argument;
   while (1) {
     QTZ_OBC_Routine_Tick(&GLOBAL_CTX);
-
-    if (GLOBAL_CTX.i2c.tx.length != 0) {
-      if (HAL_I2C_Slave_Transmit_IT(&hi2c1, GLOBAL_CTX.i2c.tx.data,
-                                    GLOBAL_CTX.i2c.tx.length) != HAL_OK) {
-        QTZ_Debug_Error(QTZ_FREERTOS_DEBUG_PREFIX
-                        "Failed to arm the I2C msg transmission!");
-        GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
-      }
-    }
-    if (GLOBAL_CTX.uart_rs485.tx.length != 0) {
-      if (HAL_UART_Transmit_IT(&huart4, GLOBAL_CTX.uart_rs485.tx.data,
-                               GLOBAL_CTX.uart_rs485.tx.length)) {
-        QTZ_Debug_Error(QTZ_FREERTOS_DEBUG_PREFIX
-                        "Failed to arm the UART msg transmission!");
-        GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
-      }
-    }
+    // TODO: Implement the watchdog logic...
   }
 }
 
