@@ -63,7 +63,7 @@ void QTZ_OBC_InitWithGlobals(QTZ_OBC_Ctx *ctx) {
 //
 // Main OBC state machine for handling communications between the main OBC and
 // the secondary OBC.
-void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
+static void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   if (ctx == NULL || p == NULL) {
     return;
   }
@@ -103,7 +103,7 @@ void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
     if (ctx->state != QTZ_OBC_STATE_HANDOVER_IDLE) {
       QTZ_Debug_Warning(
           QTZ_OBC_ROUTINE_PREFIX
-          "Can't heartbeat when no handover begin has been called!\n");
+          "Can't heartbeat when no handover begin has been called!");
       return;
     }
     QTZ_OBC_Packet resp = {
@@ -268,7 +268,8 @@ QTZ_OBC_TaskCommandHandling QTZ_OBC_MILO_TaskTick(QTZ_OBC_Ctx *ctx,
   return QTZ_OBC_TASK_COMMAND_HANDLED;
 }
 
-void QTZ_OBC_HandleSubsystemCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
+static void QTZ_OBC_HandleSubsystemCommand(QTZ_OBC_Ctx *ctx,
+                                           QTZ_OBC_Packet *p) {
   if (QTZ_OBC_TASK_COMMAND_HANDLED == QTZ_OBC_MILO_TaskTick(ctx, p)) {
     return; // MILO handled the command, so we don't need to check if the other
             // subsystems should handle it!

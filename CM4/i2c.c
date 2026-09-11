@@ -25,6 +25,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "i2c.h"
+#include "common.h"
 #include "debug.h"
 #include "obc.h"
 #include "stm32h7xx_hal_i2c.h"
@@ -185,7 +186,16 @@ void QTZ_OBC_I2C_OnRxComplete(I2C_HandleTypeDef *ctx) {
     return;
   }
 
+  GLOBAL_CTX.i2c.rx.length = GLOBAL_CTX.i2c.rx.capacity;
   GLOBAL_CTX.watchdog_ticks = 0U;
+
+  if (HAL_I2C_Slave_Receive_IT(ctx, GLOBAL_CTX.i2c.rx.data,
+                               GLOBAL_CTX.i2c.rx.capacity) != HAL_OK) {
+
+    QTZ_Debug_Error(QTZ_OBC_I2C_DEBUG_PREFIX
+                    "Failed to arm the receive for I2C!");
+    GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
+  }
 }
 
 void QTZ_OBC_I2C_OnTxComplete(I2C_HandleTypeDef *ctx) {
@@ -194,13 +204,7 @@ void QTZ_OBC_I2C_OnTxComplete(I2C_HandleTypeDef *ctx) {
   }
 
   GLOBAL_CTX.watchdog_ticks = 0U;
-  if (HAL_I2C_Slave_Receive_IT(ctx, GLOBAL_CTX.i2c.rx.data,
-                               GLOBAL_CTX.i2c.rx.capacity) != HAL_OK) {
-
-    QTZ_Debug_Error(QTZ_OBC_I2C_DEBUG_PREFIX
-                    "Failed to arm the receive for I2C!");
-    GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
-  }
+  QTZ_ByteArray_Reset(&GLOBAL_CTX.i2c.tx);
 }
 
 void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {

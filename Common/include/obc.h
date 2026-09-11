@@ -23,12 +23,14 @@ typedef struct {
 // Make sure the packet above only contains uint8_t.
 // If it doesn't, then this length won't make sense!
 #define QTZ_OBC_PACKET_LEN sizeof(QTZ_OBC_Packet)
+_Static_assert(sizeof(QTZ_OBC_Packet) == 6,
+               "The QTZ_OBC_Packet size has changed! Is this ok?");
 
-#define QTZ_OBC_I2C_TX_LEN QTZ_OBC_PACKET_LEN * 3
+#define QTZ_OBC_I2C_TX_LEN QTZ_OBC_PACKET_LEN
 #define QTZ_OBC_I2C_RX_LEN QTZ_OBC_PACKET_LEN
 
-#define QTZ_OBC_UART_TX_LEN QTZ_OBC_PACKET_LEN * 10
-#define QTZ_OBC_UART_RX_LEN QTZ_OBC_PACKET_LEN * 10
+#define QTZ_OBC_UART_TX_LEN QTZ_OBC_PACKET_LEN
+#define QTZ_OBC_UART_RX_LEN QTZ_OBC_PACKET_LEN
 
 typedef enum {
   QTZ_OBC_PROTOCOL_HANDOVER = 'H',
