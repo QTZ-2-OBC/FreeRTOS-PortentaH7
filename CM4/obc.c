@@ -1,84 +1,48 @@
-#include "obc.h"
-#include "cmsis_os2.h"
 #include "debug.h"
-#include "rs485.h"
+#include "i2c.h"
+#include "portmacro.h"
+#include "usart.h"
+#include <obc.h>
 
-char *QTZ_OBC_ToStr(QTZ_OBC_Module module_id) {
-#ifdef QTZ_DEBUG
-  switch (module_id) {
-  case QTZ_OBC_MODULE_MILO:
-    return "MILO";
-  case QTZ_OBC_MODULE_ADCS:
-    return "ADCS";
-  default:
-    return "UNKNOWN";
+#define QTZ_OBC_DEBUG_PREFIX "[OBC-IT] "
+
+void QTZ_OBC_ArmInterrupts() {
+  if (HAL_I2C_Slave_Receive_IT(&hi2c1, GLOBAL_CTX.i2c.rx.data,
+                               GLOBAL_CTX.i2c.rx.capacity) != HAL_OK) {
+    QTZ_Debug_Error(QTZ_OBC_DEBUG_PREFIX
+                    "Failed to arm the I2C slave receive!");
+    GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
   }
-#else
-  return "";
-#endif
+  if (HAL_UART_Receive_IT(&huart4, GLOBAL_CTX.uart_rs485.rx.data,
+                          GLOBAL_CTX.uart_rs485.rx.capacity) != HAL_OK) {
+    QTZ_Debug_Error(QTZ_OBC_DEBUG_PREFIX
+                    "Failed to arm the I2C slave receive!");
+    GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
+  }
 }
 
-// FIXME: This is a temporary implementation, it doesn't quite handle all
-// errors!
-QTZ_OBC_Result QTZ_OBC_SendCommand(QTZ_OBC_Command cmd,
-                                   QTZ_ByteArray *response_buffer) {
-  char *module_name = QTZ_OBC_ToStr(cmd.module_id);
-  QTZ_Debug_Log("%s: Command: '%c' - Pre/Post Delay: %d:%d - Timeouts: %d:%d - "
-                "Expects: %d\n",
-                module_name, cmd.command_id, cmd.pre_delay, cmd.post_delay,
-                cmd.send_timeout, cmd.recv_timeout, cmd.response_size);
-  if (cmd.pre_delay != 0) {
-    osDelay(cmd.pre_delay);
+void QTZ_OBC_BeginCritical() { portENTER_CRITICAL(); }
+
+void QTZ_OBC_EndCritical() { portEXIT_CRITICAL(); }
+
+QTZ_OBC_OperationResult QTZ_OBC_SendI2C_IT(QTZ_ByteArray *msg) {
+  switch (HAL_I2C_Slave_Transmit_IT(&hi2c1, msg->data, msg->length)) {
+  case HAL_OK:
+    return QTZ_OBC_RESULT_OK;
+  case HAL_TIMEOUT:
+    return QTZ_OBC_RESULT_TIMEOUT;
+  default:
+    return QTZ_OBC_RESULT_ERROR;
   }
+}
 
-  {
-    QTZ_SENDRS485_Result result =
-        QTZ_RS485_SendCStr((char *const)&cmd.command_id, 1, cmd.send_timeout);
-    if (QTZ_SENDRS485_OK != result) {
-      QTZ_Debug_Error("%s: Failed to send command! Error: %d\n", module_name,
-                      result);
-      Error_Handler();
-    }
+QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg) {
+  switch (HAL_UART_Transmit_IT(&huart4, msg->data, msg->length)) {
+  case HAL_OK:
+    return QTZ_OBC_RESULT_OK;
+  case HAL_TIMEOUT:
+    return QTZ_OBC_RESULT_TIMEOUT;
+  default:
+    return QTZ_OBC_RESULT_ERROR;
   }
-
-  QTZ_Debug_Log("%s: Waiting for response...\n", QTZ_OBC_ToStr(cmd.module_id));
-  {
-    QTZ_RECEIVERS485_Result result =
-        QTZ_RS485_Receive(response_buffer, cmd.response_size, cmd.recv_timeout);
-    if (QTZ_RECEIVERS485_OK != result) {
-      QTZ_Debug_Error(
-          "%s: Failed to receive response from command! Error: %d\n",
-          module_name, result);
-      Error_Handler();
-    }
-  }
-
-  QTZ_Debug_Log("%s: Sending ACK...\n", module_name);
-  {
-    QTZ_SENDRS485_Result result =
-        QTZ_RS485_SendCStr(QTZ_OBC_ACK, 1, cmd.send_timeout);
-    if (QTZ_SENDRS485_OK != result) {
-      QTZ_Debug_Error("%s: Failed to send ack! Error: %d\n", module_name,
-                      result);
-      Error_Handler();
-    }
-  }
-  QTZ_OBC_Result response_status = response_buffer->data[0];
-  QTZ_Debug_Log("%s: Received response: D:%d C:%c - '%.*s'\n", module_name,
-                response_status, response_status, response_buffer->length,
-                response_buffer->data);
-
-  QTZ_Debug_Log("%s: Command done!\n", module_name);
-
-  if (response_status != QTZ_OBC_OK) {
-    QTZ_Debug_Warning("%s: The response status is not 'D:%d'!\n", module_name,
-                      QTZ_OBC_OK);
-    // NOTE: Normally this would be an error we would like to handle in some way
-    // a simple print is enough since it's the caller that determines if it's an
-    // error or not
-
-    // Error_Handler();
-  }
-
-  return response_status;
 }

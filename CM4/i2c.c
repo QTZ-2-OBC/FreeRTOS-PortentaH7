@@ -25,8 +25,14 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "i2c.h"
+#include "common.h"
+#include "debug.h"
+#include "obc.h"
+#include "stm32h7xx_hal_i2c.h"
 
 /* USER CODE BEGIN 0 */
+
+#define QTZ_OBC_I2C_DEBUG_PREFIX "[OBC-I2C]"
 
 /* USER CODE END 0 */
 
@@ -39,7 +45,7 @@ void MX_I2C1_Init(void) {
   hi2c1.Instance = I2C1;
   hi2c1.Init.Timing = 0x10C0ECFF;
   hi2c1.Init.OwnAddress1 =
-      (0x09
+      (0x50
        << 1); // Supposedly the HAL API expects the address to be shifted by 1.
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -172,6 +178,43 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef *i2cHandle) {
     /* USER CODE BEGIN I2C3_MspDeInit 1 */
 
     /* USER CODE END I2C3_MspDeInit 1 */
+  }
+}
+
+void QTZ_OBC_I2C_OnRxComplete(I2C_HandleTypeDef *ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+
+  GLOBAL_CTX.i2c.rx.length = GLOBAL_CTX.i2c.rx.capacity;
+  GLOBAL_CTX.watchdog_ticks = 0U;
+
+  if (HAL_I2C_Slave_Receive_IT(ctx, GLOBAL_CTX.i2c.rx.data,
+                               GLOBAL_CTX.i2c.rx.capacity) != HAL_OK) {
+
+    QTZ_Debug_Error(QTZ_OBC_I2C_DEBUG_PREFIX
+                    "Failed to arm the receive for I2C!");
+    GLOBAL_CTX.state = QTZ_OBC_STATE_ERROR;
+  }
+}
+
+void QTZ_OBC_I2C_OnTxComplete(I2C_HandleTypeDef *ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+
+  GLOBAL_CTX.watchdog_ticks = 0U;
+  QTZ_ByteArray_Reset(&GLOBAL_CTX.i2c.tx);
+}
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c) {
+  if (hi2c == &hi2c1) {
+    QTZ_OBC_I2C_OnRxComplete(hi2c);
+  }
+}
+void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+  if (hi2c == &hi2c1) {
+    QTZ_OBC_I2C_OnTxComplete(hi2c);
   }
 }
 

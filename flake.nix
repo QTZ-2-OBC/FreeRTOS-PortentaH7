@@ -28,6 +28,7 @@
           pkgs.bear
           pkgs.picocom
           pkgs.clang-tools # Formatter and others...
+          pkgs.ruff # Python linter and formatter...
         ];
       };
     });

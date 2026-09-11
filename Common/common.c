@@ -1,4 +1,4 @@
-#include "./include/common.h"
+#include "include/common.h"
 #include <string.h>
 
 void QTZ_ByteArray_Init(QTZ_ByteArray *self, uint8_t *data, size_t capacity) {
@@ -47,7 +47,7 @@ QTZ_BYTEARRAYAPPEND_Result QTZ_ByteArray_Append(QTZ_ByteArray *self,
 
 QTZ_BYTEARRAYEXTEND_Result QTZ_ByteArray_Extend(QTZ_ByteArray *self,
                                                 QTZ_ByteArray *other) {
-  if ((self->length + other->length) >= self->capacity) {
+  if ((self->length + other->length) > self->capacity) {
     return QTZ_BYTEARRAYEXTEND_NOT_ENOUGH_SPACE;
   }
 

@@ -11,6 +11,7 @@
 #include "fmc.h"
 #include "gpio.h"
 #include "i2c.h"
+#include "obc.h"
 #include "rs485.h"
 #include "usart.h"
 
@@ -30,6 +31,7 @@ int main(void) {
   QTZ_RS485_InitGPIO();
   // MX_LPUART1_UART_Init();
   MX_I2C1_Init();
+  QTZ_OBC_InitWithGlobals(&GLOBAL_CTX);
   MX_FREERTOS_Init();
   /* Start scheduler */
   osKernelStart();
