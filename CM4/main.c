@@ -5,11 +5,9 @@
 // main.c for MRNIU/FreeRTOS-PortentaH7.
 
 #include "main.h"
-#include "Legacy/stm32_hal_legacy.h"
+#include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "debug.h"
-#include "fmc.h"
-#include "gpio.h"
 #include "i2c.h"
 #include "obc.h"
 #include "rs485.h"

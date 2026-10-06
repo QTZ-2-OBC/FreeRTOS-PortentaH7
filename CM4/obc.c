@@ -1,3 +1,4 @@
+#include "FreeRTOS.h"
 #include "debug.h"
 #include "i2c.h"
 #include "portmacro.h"

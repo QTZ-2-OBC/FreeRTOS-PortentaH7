@@ -6,16 +6,10 @@
 
 // NOTE: Even though is marked as unused, don't uncomment this file!
 #include "FreeRTOS.h"
-#include "adcs.h"
 #include "cmsis_os2.h"
 #include "debug.h"
-#include "i2c.h"
-#include "main.h"
-#include "milo.h"
 #include "obc.h"
 #include "portable.h"
-#include "stm32h7xx_hal_i2c.h"
-#include "stm32h7xx_hal_uart.h"
 #include "task.h"
 #include <common.h>
 #include <rs485.h>
