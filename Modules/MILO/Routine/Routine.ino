@@ -1,6 +1,9 @@
 #include <ArduinoRS485.h>
 #include <Wire.h>
 
+#define QTZ_OBC_PACKET_LEN 6
+#define QTZ_OBC_SUBMODULE_ID 'M'
+
 constexpr uint32_t RS485_BAUD = 115200;
 constexpr uint32_t RS485_INTERBYTE_TIMEOUT_MS = 50;
 
@@ -11,10 +14,10 @@ constexpr uint32_t I2C_POLL_INTERVAL_MS = 2;
 
 constexpr uint8_t OPENMV_RESET_PIN = 3;
 
-const uint8_t TIMEOUT_RESPONSE[] = {'S', 2, 'P', 20, 0, 0};
+const uint8_t TIMEOUT_RESPONSE[QTZ_OBC_PACKET_LEN] = {'S', 2, 'P', 20, 0, 0};
+const uint8_t EMPTY_PACKET[QTZ_OBC_PACKET_LEN] = {0};
 
 // -- BUFFERS --
-#define QTZ_OBC_PACKET_LEN 6
 uint8_t req_buffer[QTZ_OBC_PACKET_LEN];
 uint8_t res_buffer[QTZ_OBC_PACKET_LEN];
 
@@ -34,18 +37,44 @@ void setup() {
 void print_command(uint8_t* buff) {
   for (int i = 0; i < QTZ_OBC_PACKET_LEN; i++) {
     Serial.print(buff[i]);
+    Serial.print(" ");
   }
   Serial.println();
 }
 
+bool command_equals(const uint8_t* buff, const uint8_t* buff2) {
+  for (int i = 0; i < QTZ_OBC_PACKET_LEN; i++) {
+    if (buff[i] != buff2[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void copy_onto(const uint8_t* src, uint8_t* dst, uint8_t length) {
+  for (int i = 0; i < length; i++) {
+    dst[i] = src[i];
+  }
+}
+
 void loop() {
   if (receiveRS485Command()) {
+    if (command_equals(req_buffer, EMPTY_PACKET)) {
+      return;
+    }
+
+    if (req_buffer[2] != QTZ_OBC_SUBMODULE_ID) {
+      return;
+    }
+    
     Serial.println("Command received!");
     print_command(req_buffer);
 
     bool ok = sendI2CCommandAndWait(I2C_RESPONSE_TIMEOUT_MS);
     if (!ok) {
       Serial.println("Timeout waiting for response from I2C!");
+      copy_onto(TIMEOUT_RESPONSE, res_buffer, QTZ_OBC_PACKET_LEN);
       // if (QTZ_OBC_RESULT_OK != QTZ_OBC_WritePacket(&RES, TIMEOUT_RESPONSE)) {
       // Serial.println("Failed to write the timeout to the response buffer!");
       // }
@@ -64,6 +93,7 @@ void loop() {
     }
 
     sendRS485Response();
+    delay(1500);
   }
 }
 
