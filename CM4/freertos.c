@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "obc.h"
 #include "portable.h"
+#include "stm32h7xx_hal.h"
 #include "task.h"
 #include <common.h>
 #include <rs485.h>
@@ -33,6 +34,7 @@ void PrintAvailableHeap() {
 
 void MX_MainRoutine(void *argument) {
   (void)argument;
+
   QTZ_OBC_Packet ping = {
       .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
       .status = QTZ_OBC_RESULT_OK,
@@ -44,8 +46,18 @@ void MX_MainRoutine(void *argument) {
   while (1) {
     QTZ_OBC_WritePacket(&GLOBAL_CTX.i2c.rx,
                         ping); // Send the ping command over and over
+    QTZ_Debug_Log("[MAIN]: Pre-tick UART4 State: %u - %u", huart4.gState,
+                  HAL_UART_STATE_READY);
     QTZ_OBC_Routine_Tick(&GLOBAL_CTX);
-    osDelay(1750);
+    QTZ_Debug_Log("[MAIN]: Post-tick UART4 State: %u - %u", huart4.gState,
+                  HAL_UART_STATE_READY);
+    // QTZ_Debug_Log("[MAIN]: .uart_rs485.length: %d - .uart_rs485.capacity:
+    // %d",
+    //               GLOBAL_CTX.uart_rs485.tx.length,
+    //               GLOBAL_CTX.uart_rs485.tx.capacity)
+
+    // HAL_Delay(1750);
+    // osDelay(1750);
     // TODO: Implement the watchdog logic...
   }
 }
@@ -54,6 +66,7 @@ void MX_FREERTOS_Init(void) {
   // milo_thread = osThreadNew(MILO_Routine, NULL, &milo_thread_attributes);
   // adcs_thread = osThreadNew(ADCS_Routine, NULL, &adcs_thread_attributes);
   // i2c_thread = osThreadNew(I2C_Routine, NULL, &i2c_thread_attributes);
+
   main_routine_thread =
       osThreadNew(MX_MainRoutine, NULL, &main_routine_thread_attributes);
 }

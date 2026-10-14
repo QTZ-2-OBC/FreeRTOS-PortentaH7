@@ -33,13 +33,15 @@ void QTZ_RS485_OnTxComplete(UART_HandleTypeDef *ctx) {
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart4) {
+  if (huart->Instance == huart4.Instance) {
+    // if (huart == &huart4) {
     QTZ_RS485_OnRxComplete(huart);
   }
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart4) {
+  if (huart->Instance == huart4.Instance) {
+    // if (huart == &huart4) {
     QTZ_RS485_OnTxComplete(huart);
   }
 }

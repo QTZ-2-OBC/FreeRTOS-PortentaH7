@@ -82,17 +82,17 @@ void MX_UART4_Init(void) {
   if (HAL_UART_Init(&huart4) != HAL_OK) {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) !=
-      HAL_OK) {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) !=
-      HAL_OK) {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK) {
-    Error_Handler();
-  }
+  // if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) !=
+  //     HAL_OK) {
+  //   Error_Handler();
+  // }
+  // if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) !=
+  //     HAL_OK) {
+  //   Error_Handler();
+  // }
+  // if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK) {
+  //   Error_Handler();
+  // }
 }
 
 /* UART7 init function */
@@ -206,6 +206,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle) {
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* USER CODE BEGIN UART4_MspInit 1 */
+
+    HAL_NVIC_SetPriority(UART4_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(UART4_IRQn);
 
     /* USER CODE END UART4_MspInit 1 */
   } else if (uartHandle->Instance == UART7) {

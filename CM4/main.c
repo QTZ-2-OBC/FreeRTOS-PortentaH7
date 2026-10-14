@@ -27,9 +27,13 @@ int main(void) {
   MX_UART4_Init();      // UART for RS485
   QTZ_Debug_Init();
   QTZ_RS485_InitGPIO();
+  // QTZ_Debug_Log("[MAIN]: UART4 State: %u - %u", huart4.gState,
+  //               HAL_UART_STATE_READY);
   // MX_LPUART1_UART_Init();
   MX_I2C1_Init();
   QTZ_OBC_InitWithGlobals(&GLOBAL_CTX);
+  // QTZ_Debug_Log("[MAIN]: UART4 State: %u - %u", huart4.gState,
+  //               HAL_UART_STATE_READY);
   MX_FREERTOS_Init();
   /* Start scheduler */
   osKernelStart();

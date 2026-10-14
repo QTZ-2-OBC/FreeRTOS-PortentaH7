@@ -330,6 +330,8 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
       QTZ_Debug_Error(QTZ_OBC_ROUTINE_PREFIX
                       "Failed to arm the I2C msg transmission!");
       ctx->state = QTZ_OBC_STATE_ERROR;
+    } else {
+      QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX "I2C packet armed!");
     }
   }
 
@@ -338,6 +340,9 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
       QTZ_Debug_Error(QTZ_OBC_ROUTINE_PREFIX
                       "Failed to arm the RS485 msg transmission!");
       ctx->state = QTZ_OBC_STATE_ERROR;
+    } else {
+      QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX "RS485 packet armed! length: %d",
+                    ctx->uart_rs485.tx.length);
     }
   }
 }
