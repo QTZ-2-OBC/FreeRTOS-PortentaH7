@@ -69,6 +69,18 @@ static void QTZ_OBC_HandleHandoverCommand(QTZ_OBC_Ctx *ctx, QTZ_OBC_Packet *p) {
   }
 
   switch (p->cmd_id) {
+  case QTZ_OBC_COMMAND_MILO_PING: { // FIXME: Only for testing, remove after
+                                    // testing.
+    QTZ_OBC_Packet resp = {
+        .protocol_id = QTZ_OBC_PROTOCOL_SUBSYSTEMS,
+        .status = QTZ_OBC_RESULT_OK,
+        .subsys = QTZ_OBC_SUBSYSTEM_MILO,
+        .cmd_id = QTZ_OBC_COMMAND_MILO_PING,
+        .param0 = 0,
+        .param1 = 0,
+    };
+    QTZ_OBC_RespondWithPacket(ctx, &ctx->uart_rs485.tx, resp);
+  } break;
   case QTZ_OBC_COMMAND_GOMSPACE_PING: {
     QTZ_OBC_Packet resp = {
         .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
