@@ -36,16 +36,16 @@ void MX_MainRoutine(void *argument) {
   QTZ_OBC_Packet ping = {
       .protocol_id = QTZ_OBC_PROTOCOL_HANDOVER,
       .status = QTZ_OBC_RESULT_OK,
-      .subsys = QTZ_OBC_SUBSYSTEM_MILO,
+      .subsys = QTZ_OBC_SUBSYSTEM_PORTENTA,
       .cmd_id = QTZ_OBC_COMMAND_MILO_PING,
       .param0 = 0,
       .param1 = 0,
   };
   while (1) {
-    QTZ_OBC_WritePacket(&GLOBAL_CTX.uart_rs485.tx,
+    QTZ_OBC_WritePacket(&GLOBAL_CTX.i2c.rx,
                         ping); // Send the ping command over and over
     QTZ_OBC_Routine_Tick(&GLOBAL_CTX);
-    osDelay(750);
+    osDelay(1750);
     // TODO: Implement the watchdog logic...
   }
 }

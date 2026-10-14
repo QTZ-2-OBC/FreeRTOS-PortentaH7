@@ -5,7 +5,7 @@
 #include "usart.h"
 #include <obc.h>
 
-#define QTZ_OBC_DEBUG_PREFIX "[OBC-IT] "
+#define QTZ_OBC_DEBUG_PREFIX "[OBC-IT]: "
 
 void QTZ_OBC_ArmInterrupts() {
   if (HAL_I2C_Slave_Receive_IT(&hi2c1, GLOBAL_CTX.i2c.rx.data,
@@ -38,7 +38,14 @@ QTZ_OBC_OperationResult QTZ_OBC_SendI2C_IT(QTZ_ByteArray *msg) {
 }
 
 QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg) {
-  switch (HAL_UART_Transmit_IT(&huart4, msg->data, msg->length)) {
+  HAL_StatusTypeDef result =
+      HAL_UART_Transmit_IT(&huart4, msg->data, msg->length);
+  if (result != HAL_OK) {
+    QTZ_Debug_Error(QTZ_OBC_DEBUG_PREFIX
+                    "Failed to arm the RS485 msg transmission! Error: %d - %d",
+                    result, HAL_UART_GetError(&huart4));
+  }
+  switch (result) {
   case HAL_OK:
     return QTZ_OBC_RESULT_OK;
   case HAL_TIMEOUT:
