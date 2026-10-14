@@ -160,11 +160,14 @@ bear --output CM7/compile_commands.json -- xc m7
 
 ### monitor_usb
 
+Inputs: TTY
+
 Monitor output from serial monitor on Linux! You may need to change the serial
 port...
 
 ```sh
-picocom -b 115200 -r -l /dev/ttyUSB0 --imap lfcrlf
+TTY=${TTY:-/dev/ttyUSB0}
+picocom -b 115200 -r -l "$TTY" --imap lfcrlf
 ```
 
 ### monitor_acm
@@ -175,5 +178,6 @@ Monitor output from serial monitor on Linux! You may need to change the serial
 port...
 
 ```sh
+TTY=${TTY:-/dev/ttyACM0}
 picocom -b 115200 -r -l "$TTY" --imap lfcrlf
 ```
