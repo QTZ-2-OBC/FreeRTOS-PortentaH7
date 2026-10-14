@@ -82,9 +82,10 @@ num_actual = 0
 def load_labels(path):
     return [line.rstrip('\n') for line in open(path)]
 
-def send_image(image):
-    datos_jpeg = image.bytearray()
 
+# ---------------- Funciones Añadidas ------------------
+def _send_bytes(datos_jpeg):
+    #datos_jpeg = image.bytearray()
     total_size = len(datos_jpeg)
     paquete_size = 1024
     #-----Calculo del total de paquetes-----
@@ -118,6 +119,15 @@ def send_image(image):
             break
 
     print("Transmisión de imagen finalizada.")
+
+def send_file(ruta):
+    with open(ruta, "rb") as f:
+        datos = bytearray(f.read())
+    _send_bytes(datos)
+
+def send_image(image):
+    _send_bytes(image.bytearray())
+
 
 # ---------------- LOAD MODEL ----------------
 def load_model(model_id):
@@ -221,23 +231,17 @@ while True:
                 direct = "images"
                 archivos = os.listdir(direct)
 
+                arch_list_name=[]
                 for archivo in archivos:
                     if archivo.endswith(".jpg") or archivo.endswith(".jpeg"):
                         print("Encontrado:", archivo)
-                        #img = image.Image(direct + archivo)
-                        #print(img.compressed_for_ide(),end="")
+                        arch_list_name.append(archivo)
+                # Se hace el envio de la lista de imagenes a SAMD
+                response = ",".join(arch_list_name)
 
 
-                #nombre = input("Ingrese el nombre del archivo:")
-                #if nombre in archivos:
-                    #print("Archivo encontrado...")
-                #else:
-                    #print("Archivo no encontrado")
-
-                # Pedir ingreso nombre de la imagen requerida
-                # Activar SPI
-                # Empaquetar
-                # Enviar por SPI
+            ##-----------Enviar la metadata de la lista de imagenes.--------
+            elif cmd == 'MD':
 
             # -------- CAPTURA --------
             elif cmd == 'S':
@@ -275,34 +279,35 @@ while True:
                     print("Guardo:", nombre)
 
                 else:
-                    print("Valor no alcanzado")
+                    print("Valor alcanzado")
 
-                send_imgs = [] # Variable temporar la contener a las imagenes
+                send_imgs = [] # Variable temporar para contener a las imagenes
                 # Loop cuando se alcance el limite y hacer el envio de 3 imagenes
-                while num_imagenes == num_img_act:
+                if num_imagenes == num_img_act:
                     num_img_act += 10
                     ruta = "images"
                     archivos = os.listdir(ruta)
 
                     if rand_arch < 3:#Envio aleatorio de 3/4 archivos de imagen
-                        if archivos:
-                            img_aleat = random.choice(archivos)
+                        disponibles = [a for a in archivos if a not in send_imgs]
+                        if disponibles:
+                            img_aleat = random.choice(disponibles)
                             print("Archivo: ", img_aleat)
                             send_imgs.append(img_aleat)
-                            #Mandamos por SPI
-                            #os.remove(img_aleat) #Como removemos
                         rand_arch += 1
 
                     elif rand_arch == 3: #Se eliminan los archivos de la matriz (send_imgs)
+                        #Mandamos por SPI las 3 imagenes mediante un bucle.
+                        for img in send_imgs:
+                            ruta_img = os.path.join(ruta, img)
+                            send_image(ruta_img)
+                            os.remove(ruta_img)
+
+                        send_imgs.clear()
                         rand_arch = 0
-                        os.remove(send_imgs[0])
-                        os.remove(send_imgs[1])
-                        os.remove(send_imgs[2])
                         response = "Send 3 img"
 
                 response = "CantImg:%d" %(num_imagenes)
-                for img in send_imgs
-                    send_image(img)
 
             # ------ FUNCIONES EXTRAS -------
             elif cmd == 'B':

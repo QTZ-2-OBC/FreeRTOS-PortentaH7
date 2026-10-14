@@ -206,7 +206,7 @@ void loop() {
   }
   Serial.println("DONE!");
 
-  //Control de Automatización del sistema
+  //------------Control de Automatización del sistema-------------
   unsigned long tiempoActual = millis();
   if(tiempoActual-tiempoAnterior >= intervalo && cant_comand < 3){
       tiempoAnterior = tiempoActual;
