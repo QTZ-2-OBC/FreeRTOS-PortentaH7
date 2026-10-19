@@ -56,7 +56,7 @@ void MX_MainRoutine(void *argument) {
     //               GLOBAL_CTX.uart_rs485.tx.length,
     //               GLOBAL_CTX.uart_rs485.tx.capacity)
 
-    // HAL_Delay(1750);
+    HAL_Delay(1750);
     // osDelay(1750);
     // TODO: Implement the watchdog logic...
   }
