@@ -20,15 +20,24 @@
     in {
       default = pkgs.mkShell {
         packages = [
+          # Task runners
+          pkgs.xc
+          pkgs.gnumake
+
+          # Compilers
           pkgs.gcc
           pkgs.gcc-arm-embedded-13
           pkgs.pkgsCross.arm-embedded.dfu-util
-          pkgs.xc
-          pkgs.gnumake
+
+          # Configuration and others
           pkgs.bear
           pkgs.picocom
           pkgs.clang-tools # Formatter and others...
           pkgs.ruff # Python linter and formatter...
+
+          # Fuzzing tools
+          pkgs.llvm
+          pkgs.aflplusplus
         ];
       };
     });
