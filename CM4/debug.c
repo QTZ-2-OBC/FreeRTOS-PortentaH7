@@ -1,5 +1,5 @@
+#include "../Common/obc.h"
 #include "usart.h"
-#include <debug.h>
 #include <string.h>
 
 #ifdef QTZ_DEBUG

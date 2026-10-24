@@ -1,9 +1,8 @@
+#include "../Common/obc.h"
 #include "FreeRTOS.h"
-#include "debug.h"
 #include "i2c.h"
 #include "portmacro.h"
 #include "usart.h"
-#include <obc.h>
 
 #define QTZ_OBC_DEBUG_PREFIX "[OBC-IT]: "
 
@@ -54,3 +53,5 @@ QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg) {
     return QTZ_OBC_RESULT_ERROR;
   }
 }
+
+void QTZ_Panic() { Error_Handler(); }

@@ -1,7 +1,5 @@
+#include "../Common/obc.h"
 #include "cmsis_os2.h"
-#include "common.h"
-#include "debug.h"
-#include <obc.h>
 #include <rs485.h>
 #include <strings.h>
 #include <usart.h>

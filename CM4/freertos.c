@@ -6,13 +6,11 @@
 
 // NOTE: Even though is marked as unused, don't uncomment this file!
 #include "FreeRTOS.h"
+#include "../Common/obc.h"
 #include "cmsis_os2.h"
-#include "debug.h"
-#include "obc.h"
 #include "portable.h"
 #include "stm32h7xx_hal.h"
 #include "task.h"
-#include <common.h>
 #include <rs485.h>
 #include <strings.h>
 

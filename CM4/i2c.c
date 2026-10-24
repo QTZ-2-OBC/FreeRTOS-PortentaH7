@@ -25,9 +25,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "i2c.h"
-#include "common.h"
-#include "debug.h"
-#include "obc.h"
+#include "../Common/obc.h"
 #include "stm32h7xx_hal_i2c.h"
 
 /* USER CODE BEGIN 0 */
