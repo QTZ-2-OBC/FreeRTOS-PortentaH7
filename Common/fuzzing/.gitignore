@@ -1,0 +1,5 @@
+seeds/
+*.exe
+covout/
+output/
+*.profraw

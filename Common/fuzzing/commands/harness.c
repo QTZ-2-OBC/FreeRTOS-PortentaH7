@@ -22,8 +22,8 @@ int main(int argc, char **argv) {
 
   char tmp[12] = {0};
 
-  // Read type of packet
-  fread(tmp, 1, 1, f);
+  // Read type of packet. If it didn't read anything then default to 0.
+  int _ = fread(tmp, 1, 1, f);
 
   // Read packet data
   switch (tmp[0]) {

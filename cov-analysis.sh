@@ -1,0 +1,5881 @@
+#!/usr/bin/env bash
+#
+#  File: cov-analysis
+#
+#  Version: 1.3-dev
+#
+#  Purpose: Generate LLVM source-based code coverage reports from AFL++ corpus.
+#           Replays queue/crash/hang files through a coverage-instrumented
+#           binary, merges .profraw profiles, and produces HTML/text/JSON
+#           reports via llvm-profdata and llvm-cov.
+#
+#  Copyright (c) 2026 by Marc "vanHauser" Heuse (vh@thc.org)
+#
+#  License: GNU Affero General Public License 3 (or any later version)
+#
+
+set -euo pipefail
+
+VERSION="1.3-dev"
+REPORT_MARKER_NAME=".cov-analysis-report"
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+QUIET=0
+VERBOSE=0
+FUZZER_LAYOUT="" # set by cmd_report; one of: afl | flat
+
+log() { test "$QUIET" -eq 0 && echo "[+] $*" || true; }
+logv() { test "$VERBOSE" -eq 1 && echo "[*] $*" || true; }
+err() { echo "[-] $*" >&2; }
+# A finding that is not an error: the run continues and publishes.
+logw() { test "$QUIET" -eq 0 && echo "[!] $*" >&2 || true; }
+# Like log() but writes to stderr. Used by commands (e.g. search) whose stdout
+# must stay machine-readable so it can be piped.
+loge() { test "$QUIET" -eq 0 && echo "[+] $*" >&2 || true; }
+logerr() { test "$QUIET" -eq 0 && echo "[-] $*" >&2 || true; }
+
+# Use TMPDIR when provided, otherwise fallback to /tmp default.
+tmp_base_dir() {
+	printf '%s' "${TMPDIR:-/tmp}"
+}
+
+# Identify the running copy, not just its version string. Two installations can
+# carry the same VERSION and differ by months; the content hash and the path
+# settle which one actually ran.
+version_string() {
+	local self hash="unknown"
+	self="${BASH_SOURCE[0]}"
+	self="$(realpath -e -- "$self" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+	if test -f "$self" && command -v sha256sum >/dev/null 2>&1; then
+		hash="$(sha256sum -- "$self" 2>/dev/null | cut -c1-12)"
+		test -n "$hash" || hash="unknown"
+	fi
+	printf 'cov-analysis-%s (sha256:%s, %s)\n' "$VERSION" "$hash" "$self"
+}
+
+require_command() {
+	local cmd="$1" purpose="$2"
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		err "$purpose requires '$cmd', but it was not found on PATH."
+		return 1
+	fi
+}
+
+require_gnu_command() {
+	local cmd="$1" package="$2" purpose="$3" version
+	require_command "$cmd" "$purpose" || return 1
+	version="$("$cmd" --version 2>/dev/null || true)"
+	case "$version" in
+	*GNU*) ;;
+	*)
+		err "$purpose requires GNU $cmd from $package."
+		return 1
+		;;
+	esac
+}
+
+require_coreutils_command() {
+	local cmd="$1" purpose="$2" version
+	require_command "$cmd" "$purpose" || return 1
+	version="$("$cmd" --version 2>/dev/null || true)"
+	case "$version" in
+	*"GNU coreutils"* | *"uutils coreutils"*) ;;
+	*)
+		err "$purpose requires '$cmd' from GNU coreutils or uutils coreutils."
+		return 1
+		;;
+	esac
+}
+
+require_replay_commands() {
+	local purpose="$1"
+	require_gnu_command find "GNU findutils" "$purpose" || return 1
+	require_gnu_command xargs "GNU findutils" "$purpose" || return 1
+	require_coreutils_command timeout "$purpose" || return 1
+	local cmd
+	for cmd in mktemp realpath sort tr wc; do
+		require_command "$cmd" "$purpose" || return 1
+	done
+}
+
+# ── queue replay deadline ─────────────────────────────────────────────────────
+# The coverage binary is not the fuzzed binary: no forkserver, -O1 with
+# counters and a profile write per exec. So the fuzzer's own slowest execution
+# is rounded up to a whole second and multiplied for headroom.
+QUEUE_TIMEOUT_FACTOR=5
+QUEUE_TIMEOUT_MIN=5
+QUEUE_TIMEOUT_FALLBACK=60
+BATCH_SIZE_DEFAULT=128
+BATCH_DEADLINE_INPUTS=10
+
+# Print "<max slowest_exec_ms> <instances>" over every fuzzer_stats an AFL++
+# output directory holds (one per parallel instance). exec_timeout stands in
+# where slowest_exec_ms is missing or zero. Returns 1 when there is no stats
+# file to read.
+afl_exec_ms() {
+	local dir="$1" p
+	local -a stats=()
+	test -f "$dir/fuzzer_stats" && stats+=("$dir/fuzzer_stats")
+	shopt -s nullglob
+	for p in "$dir"/*/fuzzer_stats; do stats+=("$p"); done
+	shopt -u nullglob
+	test "${#stats[@]}" -gt 0 || return 1
+	awk '
+    FNR == 1 { files++ }
+    $1 == "slowest_exec_ms" { slow[FILENAME] = $3 + 0 }
+    $1 == "exec_timeout"    { tmout[FILENAME] = $3 + 0 }
+    END {
+      for (f in slow) {
+        v = slow[f]
+        if (v == 0 && f in tmout) v = tmout[f]
+        if (v > max) max = v
+      }
+      for (f in tmout) if (!(f in slow) && tmout[f] > max) max = tmout[f]
+      printf "%d %d\n", max + 0, files + 0
+    }
+  ' "${stats[@]}"
+}
+
+# Print "<seconds> <ms> <instances>" for the queue replay deadline of an input
+# directory. Falls back to a fixed default for layouts that carry no AFL++
+# statistics, and for a stats file that holds no usable number.
+derive_queue_timeout() {
+	local dir="$1" layout="$2" ms=0 instances=0 secs
+	if test "$layout" = "afl"; then
+		read -r ms instances < <(afl_exec_ms "$dir" || printf '0 0\n')
+	fi
+	if test "${ms:-0}" -gt 0; then
+		secs=$((((ms + 999) / 1000) * QUEUE_TIMEOUT_FACTOR))
+		test "$secs" -lt "$QUEUE_TIMEOUT_MIN" && secs="$QUEUE_TIMEOUT_MIN"
+	else
+		secs="$QUEUE_TIMEOUT_FALLBACK"
+		ms=0
+	fi
+	printf '%d %d %d\n' "$secs" "$ms" "${instances:-0}"
+}
+
+run_with_timeout() {
+	local seconds="$1" rc=0 pid restore prev="${!-}"
+	shift
+	restore="$(trap -p INT TERM HUP)"
+	trap 'test "${!-}" = "$prev" || kill -KILL -- "-$!" "$!" 2>/dev/null; exit 130' INT
+	trap 'test "${!-}" = "$prev" || kill -KILL -- "-$!" "$!" 2>/dev/null; exit 143' TERM
+	trap 'test "${!-}" = "$prev" || kill -KILL -- "-$!" "$!" 2>/dev/null; exit 129' HUP
+	timeout --signal=TERM --kill-after=1s "${seconds}s" "$@" <&0 &
+	pid=$!
+	wait "$pid" || rc=$?
+	trap - INT TERM HUP
+	eval "$restore"
+	kill -KILL -- "-$pid" 2>/dev/null || true
+	return "$rc"
+}
+
+command_for_input() {
+	local cmd="$1" input="$2" quoted
+	printf -v quoted '%q' "$input"
+	printf '%s%s%s' "${cmd%%@@*}" "$quoted" "${cmd#*@@}"
+}
+
+run_input_command() {
+	local seconds="$1" cmd="$2" input="$3" rendered
+	case "$cmd" in
+	*@@*)
+		rendered="$(command_for_input "$cmd" "$input")"
+		run_with_timeout "$seconds" bash -c "$rendered"
+		;;
+	*)
+		run_with_timeout "$seconds" bash -c "$cmd" <"$input"
+		;;
+	esac
+}
+
+run_input_command_unbounded() {
+	local cmd="$1" input="$2" rendered
+	case "$cmd" in
+	*@@*)
+		rendered="$(command_for_input "$cmd" "$input")"
+		bash -c "$rendered"
+		;;
+	*)
+		bash -c "$cmd" <"$input"
+		;;
+	esac
+}
+
+number_inputs() {
+	local n=0 p
+	while IFS= read -r -d '' p; do
+		n=$((n + 1))
+		printf '%d\t%s\0' "$n" "$p"
+	done
+}
+
+replay_one_input() {
+	local cmd="$1" seconds="$2" dir="$3" record="$4" idx path status
+	idx="${record%%$'\t'*}"
+	path="${record#*$'\t'}"
+	export LLVM_PROFILE_FILE="$dir/${idx}-%p.profraw"
+	if test "$seconds" -gt 0; then
+		run_input_command "$seconds" "$cmd" "$path" >/dev/null 2>&1
+	else
+		run_input_command_unbounded "$cmd" "$path" >/dev/null 2>&1
+	fi
+	status=$?
+	record_slow_input "$status" "$path"
+	printf '%d\n' "$status"
+}
+
+replay_one_input_repeated() {
+	local record="$4"
+	export COV_REPEAT_TAG="${record%%$'\t'*}"
+	replay_one_input "$@"
+}
+
+# Replay one batch of inputs in a single process that profiles into a directory
+# of its own. The outer deadline is the per-input deadline times the batch size,
+# but at most <cap> per-input deadlines unless <cap> is 0. A driver binary gets
+# no cap: it bounds each input with its own alarm (COV_INPUT_TIMEOUT), so the
+# outer deadline only has to allow for every input of a slow but healthy batch.
+# A batch that exits non-zero or is killed is discarded, counted in
+# COV_BATCH_FALLBACK_LOG, and its inputs are replayed one per process, so a
+# crashing or hanging input costs no other input its coverage.
+replay_batch() {
+	local cmd="$1" seconds="$2" cap="$3" dir="$4" bdir status n=0 path deadline
+	shift 4
+	if ! bdir="$(mktemp -d "$dir/b.XXXXXX")"; then
+		printf '1 %d\n' "$#"
+		return 0
+	fi
+	export LLVM_PROFILE_FILE="$bdir/%p.profraw"
+	if test "$seconds" -gt 0; then
+		deadline="$#"
+		if test "$cap" -gt 0 && test "$deadline" -gt "$cap"; then
+			deadline="$cap"
+		fi
+		run_with_timeout "$((deadline * seconds))" \
+			bash -c "$cmd \"\$@\"" _ "$@" >/dev/null 2>&1
+	else
+		bash -c "$cmd \"\$@\"" _ "$@" >/dev/null 2>&1
+	fi
+	status=$?
+	if test "$status" -eq 0; then
+		printf '0 %d\n' "$#"
+		return 0
+	fi
+	test -z "${COV_BATCH_FALLBACK_LOG:-}" || printf '%d\n' "$#" >>"$COV_BATCH_FALLBACK_LOG"
+	rm -rf -- "$bdir"
+	if ! mkdir -- "$bdir"; then
+		printf '%d %d\n' "$status" "$#"
+		return 0
+	fi
+	for path in "$@"; do
+		n=$((n + 1))
+		replay_one_input "$cmd @@" "$seconds" "$bdir" "$n"$'\t'"$path"
+	done
+}
+
+# Name an input that hit its deadline. The driver appends to the same file when
+# its own per-input alarm fires; lines are far below PIPE_BUF, so the O_APPEND
+# writes of parallel workers do not interleave.
+record_slow_input() {
+	local status="$1" path="$2"
+	test -n "${COV_TIMEOUT_LOG:-}" || return 0
+	case "$status" in
+	124 | 137) printf '%s\n' "$path" >>"$COV_TIMEOUT_LOG" ;;
+	esac
+	return 0
+}
+
+resolve_input_dir() {
+	local dir="$1" resolved
+	if ! resolved="$(realpath -e -- "$dir" 2>/dev/null)"; then
+		err "Could not resolve input directory: $dir"
+		return 1
+	fi
+	printf '%s\n' "$resolved"
+}
+
+# Sum one status record per replayed input into "TOTAL OK FAILED KILLED
+# UNREADABLE", and report progress while doing it. Every record already passes
+# through here, so the counter needs no second channel. With <expected> set it
+# prints a progress line to stderr at most every 2 seconds: a replay that is
+# merely slow keeps a rate, a wedged one drops to 0/s. In batch mode one record
+# covers a clean batch, so progress advances in batch-sized steps.
+replay_tally() {
+	local driver="$1" expected="${2:-0}" label="${3:-files}"
+	awk -v driver="$driver" -v expected="$expected" -v label="$label" \
+		-v quiet="${QUIET:-0}" '
+    function now(   line, parts, t) {
+      t = 0
+      if ((getline line < "/proc/uptime") > 0) {
+        split(line, parts, " ")
+        t = parts[1] + 0
+      }
+      close("/proc/uptime")
+      return t
+    }
+    BEGIN { start = now(); last = start }
+    {
+      st = $1 + 0
+      n = (NF > 1 ? $2 + 0 : 1)
+      total += n
+      if (st == 0) ok += n
+      else if (st == 124 || st == 137) killed += n
+      else if (st == 2 && driver == 1) unreadable += n
+      else failed += n
+      if (quiet + 0 == 0 && expected + 0 > 0) {
+        t = now()
+        if (t - last >= 2) {
+          rate = (t > start) ? total / (t - start) : 0
+          left = (rate > 0) ? (expected - total) / rate : 0
+          if (left < 0) left = 0
+          printf "[+] %d %s: %d done, %.0f/s, ~%ds left\n",
+                 expected, label, total, rate, left > "/dev/stderr"
+          fflush("/dev/stderr")
+          last = t
+        }
+      }
+    }
+    END { printf "%d %d %d %d %d\n", total+0, ok+0, failed+0, killed+0, unreadable+0 }
+  '
+}
+
+write_profile_manifest() {
+	local dir="$1" manifest="$2"
+	find "$dir" -type f -name '*.profraw' -print | sort >"$manifest"
+}
+
+_stab_macro_sites() {
+	local profdata="$1"
+	"$LLVM_COV" export "$COV_BINARY" --format=text "-instr-profile=$profdata" 2>/dev/null |
+		python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+
+sites = {}
+for obj in data.get("data", []) or []:
+    for entry in obj.get("files", []) or []:
+        for exp in entry.get("expansions", []) or []:
+            names = exp.get("filenames") or []
+            src = exp.get("source_region") or []
+            if len(src) < 7:
+                continue
+            efid = src[6]
+            if not isinstance(efid, int) or efid < 0 or efid >= len(names):
+                continue
+            target = names[efid]
+            lines = set()
+            for region in exp.get("target_regions") or []:
+                if len(region) >= 6 and region[5] == efid:
+                    lines.add(region[0])
+            for line in lines:
+                key = (target, line)
+                sites[key] = sites.get(key, 0) + 1
+
+for (path, line), count in sorted(sites.items()):
+    print("%s:%d\t%d" % (path, line, count))
+'
+}
+
+write_gap_inventory() {
+	local perfunc="$1" out="$2" verdicts="${3-}" tmpd rc=0
+	local have_v=0
+	test -n "$verdicts" && test -s "$verdicts" && have_v=1
+	tmpd="$(mktemp -d "$(tmp_base_dir)/cov-analysis-gaps.XXXXXX")" || return 1
+
+	if test -s "$perfunc"; then
+		awk -v verdicts="$verdicts" -v have_v="$have_v" \
+			-v ffile="$tmpd/files.tsv" -v gfile="$tmpd/funcs.tsv" '
+      BEGIN {
+        if (have_v == 1) {
+          while ((getline line < verdicts) > 0) {
+            n = split(line, v, "\t")
+            if (n >= 3) vstate[v[2] "\t" v[3]] = v[1]
+          }
+          close(verdicts)
+        }
+      }
+      substr($0, 1, 6) == "File \047" {
+        f = substr($0, 7)
+        sub(/\047:[ \t]*$/, "", f)
+        cur = f
+        racc = 0
+        next
+      }
+      {
+        if (cur == "" || NF < 10) next
+        if ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/) next
+        if ($5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/) next
+        regions = $2 + 0; rmiss = $3 + 0; rcover = $4
+        lines = $5 + 0; lmiss = $6 + 0
+        if ($1 == "TOTAL") {
+          key = (have_v == 1) ? racc : rmiss
+          print key "\t" rmiss "\t" racc "\t" lmiss "\t" regions "\t" rcover "\t" cur > ffile
+          next
+        }
+        st = "none"
+        if (have_v == 1 && ((cur "\t" $1) in vstate)) st = vstate[cur "\t" $1]
+        if (st != "unreachable") racc += rmiss
+        if (regions > 0 && rmiss == regions) {
+          print rmiss "\t" lmiss "\t" st "\t" $1 "\t" cur > gfile
+        }
+      }
+    ' "$perfunc" || rc=1
+	fi
+	: >"$tmpd/files.tsv.sorted"
+	: >"$tmpd/funcs.tsv.sorted"
+	test -s "$tmpd/files.tsv" && sort -t "$(printf '\t')" -k1,1nr -k7,7 \
+		"$tmpd/files.tsv" >"$tmpd/files.tsv.sorted"
+	test -s "$tmpd/funcs.tsv" && sort -t "$(printf '\t')" -k1,1nr -k4,4 \
+		"$tmpd/funcs.tsv" >"$tmpd/funcs.tsv.sorted"
+
+	{
+		printf 'Coverage gaps\n'
+		printf '=============\n\n'
+		printf 'Ranked by ABSOLUTE uncovered regions, not by percentage: a large file at\n'
+		printf '4%% holds far more uncovered code than a small file at 0%%. Percentages are\n'
+		printf 'shown for context only. Numbers come from llvm-cov and match summary.txt.\n\n'
+
+		printf '== Files by uncovered regions ==\n\n'
+		if test "$have_v" -eq 1; then
+			printf '%10s %10s %10s %10s %8s\n' Uncovered Reachable Uncovered Total Region
+			printf '%10s %10s %10s %10s %8s  %s\n' regions uncovered lines regions cover File
+		else
+			printf '%10s %10s %10s %8s\n' Uncovered Uncovered Total Region
+			printf '%10s %10s %10s %8s  %s\n' regions lines regions cover File
+		fi
+		if test -s "$tmpd/files.tsv.sorted"; then
+			awk -F '\t' -v v="$have_v" '
+        v == 1 { printf "%10s %10s %10s %10s %8s  %s\n", $2, $3, $4, $5, $6, $7; next }
+        { printf "%10s %10s %10s %8s  %s\n", $2, $4, $5, $6, $7 }
+      ' "$tmpd/files.tsv.sorted"
+		else
+			printf '  (no per-function coverage data)\n'
+		fi
+
+		if test "$have_v" -eq 1; then
+			printf '\n== Functions with no coverage: reachable or unclassified (actionable) ==\n\n'
+			_gap_function_block "$tmpd/funcs.tsv.sorted" actionable
+			printf '\n== Functions with no coverage: statically unreachable (expected dead) ==\n\n'
+			_gap_function_block "$tmpd/funcs.tsv.sorted" dead
+		else
+			printf '\n== Functions with no coverage ==\n\n'
+			_gap_function_block "$tmpd/funcs.tsv.sorted" all
+		fi
+	} >"$out"
+
+	rm -rf -- "$tmpd"
+	test "$rc" -eq 0 || return 1
+	test -s "$out"
+}
+
+_gap_function_block() {
+	local sorted="$1" which="$2" body=""
+	printf '%10s %10s\n' Uncovered Uncovered
+	printf '%10s %10s  %-38s %s\n' regions lines Function File
+	if test -s "$sorted"; then
+		body="$(awk -F '\t' -v w="$which" '
+      w == "actionable" && $3 == "unreachable" { next }
+      w == "dead" && $3 != "unreachable" { next }
+      { printf "%10s %10s  %-38s %s\n", $1, $2, $4, $5 }
+    ' "$sorted")"
+	fi
+	if test -n "$body"; then
+		printf '%s\n' "$body"
+	else
+		printf '  (none)\n'
+	fi
+}
+
+merge_profiles() {
+	local tool="$1" dir="$2" output="$3" failure_mode="${4-}" manifest="${5-}"
+	if test -z "$manifest"; then
+		manifest="$dir/profiles.manifest"
+		write_profile_manifest "$dir" "$manifest"
+	fi
+	test -s "$manifest" || return 1
+	if test -n "$failure_mode"; then
+		"$tool" merge -sparse "--failure-mode=$failure_mode" "--input-files=$manifest" -o "$output"
+	else
+		"$tool" merge -sparse "--input-files=$manifest" -o "$output"
+	fi
+}
+
+paired_clang() {
+	local compiler="$1" direction="$2" base dir paired
+	base="$(basename -- "$compiler" 2>/dev/null)"
+	dir="${compiler%/*}"
+	test "$dir" = "$compiler" && dir=""
+	if test "$direction" = "cxx" && test "$base" = "clang"; then
+		paired="clang++"
+	elif test "$direction" = "cxx" && [[ "$base" =~ ^clang-([0-9]+)$ ]]; then
+		paired="clang++-${BASH_REMATCH[1]}"
+	elif test "$direction" = "cc" && test "$base" = "clang++"; then
+		paired="clang"
+	elif test "$direction" = "cc" && [[ "$base" =~ ^clang\+\+-([0-9]+)$ ]]; then
+		paired="clang-${BASH_REMATCH[1]}"
+	else
+		return 1
+	fi
+	if test -n "$dir"; then
+		printf '%s/%s\n' "$dir" "$paired"
+	else
+		printf '%s\n' "$paired"
+	fi
+}
+
+append_env_flags() {
+	local name="$1" addition="$2" current="${!1-}"
+	if test -n "$current"; then
+		printf -v "$name" '%s %s' "$current" "$addition"
+	else
+		printf -v "$name" '%s' "$addition"
+	fi
+	export "$name"
+}
+
+directory_nonempty() {
+	test -d "$1" && test -n "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)"
+}
+
+valid_legacy_report() {
+	local dir="$1"
+	test -s "$dir/coverage.json" &&
+		test -s "$dir/coverage.profdata" &&
+		test -s "$dir/summary.txt" &&
+		test -s "$dir/html/index.html" &&
+		test -d "$dir/text"
+}
+
+owned_report() {
+	local marker="$1/$REPORT_MARKER_NAME" first=""
+	test -f "$marker" && ! test -L "$marker" || return 1
+	IFS= read -r first <"$marker" || true
+	test "$first" = "cov-analysis-report-v1"
+}
+
+validate_staged_profdata() {
+	local dir="$1"
+	owned_report "$dir" || return 1
+	test -s "$dir/coverage.profdata" || return 1
+}
+
+validate_staged_report() {
+	local dir="$1" reachability="$2"
+	owned_report "$dir" || return 1
+	test -s "$dir/coverage.profdata" || return 1
+	test -s "$dir/coverage.json" || return 1
+	test -s "$dir/summary.txt" || return 1
+	test -s "$dir/gaps.txt" || return 1
+	test -s "$dir/html/index.html" || return 1
+	test -d "$dir/text" || return 1
+	grep -q '"data"' "$dir/coverage.json" || return 1
+	if test -n "$reachability"; then
+		grep -q 'reach-banner' "$dir/html/index.html" || return 1
+		grep -q '^Reachable-only coverage' "$dir/summary.txt" || return 1
+		grep -q '^== Reachability ' "$dir/summary.txt" || return 1
+	fi
+}
+
+_publish_report_unlocked() {
+	local stage="$1" destination="$2" parent base rollback=""
+	parent="$(dirname -- "$destination")"
+	base="$(basename -- "$destination")"
+	if test -d "$destination" && mv --exchange -T -- "$stage" "$destination" 2>/dev/null; then
+		if ! rm -rf -- "$stage"; then
+			err "Report published, but the previous report could not be removed: $stage"
+		fi
+		return 0
+	fi
+	if test -e "$destination"; then
+		rollback="$parent/.${base}.cov-analysis.rollback.$$.${RANDOM}"
+		while test -e "$rollback"; do
+			rollback="$parent/.${base}.cov-analysis.rollback.$$.${RANDOM}"
+		done
+		if ! mv -T -- "$destination" "$rollback"; then
+			err "Could not move the previous report aside for publication."
+			return 1
+		fi
+	fi
+	if ! mv -T -- "$stage" "$destination"; then
+		err "Could not publish the staged report."
+		if test -n "$rollback"; then
+			if ! mv -T -- "$rollback" "$destination"; then
+				err "Could not restore the previous report from: $rollback"
+			fi
+		fi
+		return 1
+	fi
+	if test -n "$rollback"; then
+		if ! rm -rf -- "$rollback"; then
+			err "Report published, but the previous report could not be removed: $rollback"
+		fi
+	fi
+	return 0
+}
+
+publish_report() {
+	local guard rc=0
+	if test -z "$COV_REPORT_TOKEN"; then
+		_publish_report_unlocked "$@"
+		return $?
+	fi
+	guard="$COV_REPORT_CLEAN_LOCK.takeover"
+	acquire_report_guard "$guard" || return 1
+	if ! report_lock_owned; then
+		rmdir -- "$guard" || true
+		err "Report lock was taken over; refusing to publish from a superseded run."
+		return 1
+	fi
+	_publish_report_unlocked "$@" || rc=$?
+	rmdir -- "$guard" || rc=1
+	return "$rc"
+}
+
+COV_REPORT_CLEAN_PROFRAW=""
+COV_REPORT_CLEAN_STAGE=""
+COV_REPORT_CLEAN_LOCK=""
+COV_REPORT_TOKEN=""
+COV_LOCK_PID=""
+COV_LOCK_HOST=""
+COV_LOCK_STARTED=""
+COV_LOCK_OWNER_TOKEN=""
+COV_REMOTE_HOST=""
+COV_REMOTE_WORKDIR=""
+COV_REMOTE_SSHOPTS=()
+
+cleanup_report_work() {
+	test -z "$COV_REPORT_CLEAN_PROFRAW" || rm -rf -- "$COV_REPORT_CLEAN_PROFRAW"
+	test -z "$COV_REPORT_CLEAN_STAGE" || rm -rf -- "$COV_REPORT_CLEAN_STAGE"
+	if test -n "$COV_REPORT_CLEAN_LOCK" && test -n "$COV_REPORT_TOKEN"; then
+		local guard="$COV_REPORT_CLEAN_LOCK.takeover"
+		if acquire_report_guard "$guard"; then
+			if report_lock_owned; then
+				rm -rf -- "$COV_REPORT_CLEAN_LOCK"
+			fi
+			rmdir -- "$guard" || true
+		fi
+		COV_REPORT_CLEAN_LOCK=""
+		COV_REPORT_TOKEN=""
+	fi
+	remote_cleanup
+}
+
+remote_cleanup() {
+	local host="$COV_REMOTE_HOST" rd="$COV_REMOTE_WORKDIR" script
+	test -n "$host" && test -n "$rd" || return 0
+	COV_REMOTE_HOST=""
+	COV_REMOTE_WORKDIR=""
+	script="rd=$(printf '%q' "$rd")"'
+pid=$(cat "$rd/pid" 2>/dev/null)
+if test -n "$pid" && tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$rd/cov-analysis"; then
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  i=0
+  while kill -0 "$pid" 2>/dev/null && test "$i" -lt 10; do sleep 1; i=$((i + 1)); done
+  kill -KILL -- "-$pid" 2>/dev/null
+fi
+rm -rf -- "$rd"'
+	ssh ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} -o ConnectTimeout=15 "$host" 'bash -s' \
+		<<<"$script" >/dev/null 2>&1 || true
+}
+
+parse_ssh_opts() {
+	local opts="$1" o
+	COV_REMOTE_SSHOPTS=()
+	test -n "$opts" || return 0
+	if ! printf '%s\n' "$opts" | xargs -r printf '' >/dev/null 2>&1; then
+		err "--ssh-opts has an unbalanced quote: $opts"
+		return 1
+	fi
+	while IFS= read -r -d '' o; do
+		COV_REMOTE_SSHOPTS+=("$o")
+	done < <(printf '%s\n' "$opts" | xargs -r printf '%s\0')
+}
+
+# A signal must still end the run: a trap that only cleans up would let the
+# script carry on with its workspace deleted. HUP is in the list because a
+# hung-up ssh session otherwise leaves its staging directory behind — bash runs
+# no EXIT trap for a signal it does not trap.
+install_cleanup_traps() {
+	trap cleanup_report_work EXIT
+	trap 'cleanup_report_work; exit 129' HUP
+	trap 'cleanup_report_work; exit 130' INT
+	trap 'cleanup_report_work; exit 143' TERM
+}
+
+# ── report directory lock ─────────────────────────────────────────────────────
+# Two runs against one -o both used to proceed, and the collision only surfaced
+# several steps later as a missing staging file. The lock is a directory, built
+# complete with its owner file under a temporary name and renamed into place:
+# the rename is atomic, fails while another lock exists, and needs no flock
+# (--remote ships this script to hosts whose command set is unknown).
+
+report_lock_path() {
+	printf '%s/.%s.cov-analysis.lock' "$1" "$2"
+}
+
+# Print a pid's start time. It only ever increases, so a recycled pid does not
+# pass for the original lock holder. Empty when it cannot be read.
+pid_start_time() {
+	local pid="$1" line rest
+	test -r "/proc/$pid/stat" || return 0
+	IFS= read -r line <"/proc/$pid/stat" || return 0
+	rest="${line##*) }"
+	printf '%s' "$rest" | awk '{ print $20 }'
+}
+
+this_host() {
+	local h="${HOSTNAME:-}"
+	test -n "$h" || h="$(uname -n 2>/dev/null || true)"
+	printf '%s' "$h"
+}
+
+# Set COV_LOCK_PID / COV_LOCK_HOST from a lock directory. Returns 1 when the
+# lock names no owner.
+read_lock_owner() {
+	local dir="$1" key value
+	COV_LOCK_PID=""
+	COV_LOCK_HOST=""
+	COV_LOCK_STARTED=""
+	COV_LOCK_OWNER_TOKEN=""
+	test -r "$dir/owner" || return 1
+	while read -r key value; do
+		case "$key" in
+		pid) COV_LOCK_PID="$value" ;;
+		host) COV_LOCK_HOST="$value" ;;
+		started) COV_LOCK_STARTED="$value" ;;
+		token) COV_LOCK_OWNER_TOKEN="$value" ;;
+		esac
+	done <"$dir/owner"
+	test -n "$COV_LOCK_PID"
+}
+
+report_lock_owned() {
+	test -n "$COV_REPORT_CLEAN_LOCK" && test -n "$COV_REPORT_TOKEN" &&
+		read_lock_owner "$COV_REPORT_CLEAN_LOCK" &&
+		test "$COV_LOCK_OWNER_TOKEN" = "$COV_REPORT_TOKEN"
+}
+
+acquire_report_guard() {
+	local guard="$1" tries=0
+	until mkdir -- "$guard" 2>/dev/null; do
+		tries=$((tries + 1))
+		if test "$tries" -ge 5; then
+			err "Could not lock the report directory: another run holds $guard."
+			err "If no other cov-analysis run is starting, remove it with --clean."
+			return 1
+		fi
+		sleep 1
+	done
+}
+
+# Return 0 when the lock is held by a process that is still running. A lock
+# whose owner cannot be identified counts as stale: otherwise a half-written
+# lock would wedge the directory with no way out but --force.
+report_lock_live() {
+	local dir="$1" current
+	test -d "$dir" || return 1
+	read_lock_owner "$dir" || return 1
+	# A lock taken on another host cannot be checked from here; assume it holds.
+	if test -n "$COV_LOCK_HOST" && test "$COV_LOCK_HOST" != "$(this_host)"; then
+		return 0
+	fi
+	# /proc sees processes of every user; kill -0 reports another user's process
+	# as gone (EPERM), which would break a lock that is very much alive.
+	if test -d /proc/self; then
+		test -d "/proc/$COV_LOCK_PID" || return 1
+	else
+		kill -0 "$COV_LOCK_PID" 2>/dev/null || return 1
+	fi
+	if test -n "$COV_LOCK_STARTED"; then
+		current="$(pid_start_time "$COV_LOCK_PID")"
+		test -z "$current" || test "$current" = "$COV_LOCK_STARTED" || return 1
+	fi
+	return 0
+}
+
+report_lock_refused() {
+	err "Report directory is in use by cov-analysis (pid $COV_LOCK_PID on ${COV_LOCK_HOST:-this host}):"
+	err "  $1"
+	err "Wait for that run to finish, or pass --force to take the directory over."
+}
+
+acquire_report_lock() {
+	local parent="$1" base="$2" force="${3:-0}" dir new guard token
+	dir="$(report_lock_path "$parent" "$base")"
+	if ! new="$(mktemp -d "$dir.new.XXXXXX")"; then
+		err "Could not lock the report directory: $dir"
+		return 1
+	fi
+	chmod -- "$(umask -S)" "$new" 2>/dev/null || true
+	token="${new##*.}"
+	{
+		printf 'pid %s\n' "$$"
+		printf 'started %s\n' "$(pid_start_time "$$")"
+		printf 'host %s\n' "$(this_host)"
+		printf 'token %s\n' "$token"
+	} >"$new/owner"
+	if mv -T -- "$new" "$dir" 2>/dev/null; then
+		COV_REPORT_CLEAN_LOCK="$dir"
+		COV_REPORT_TOKEN="$token"
+		return 0
+	fi
+	if test "$force" -ne 1 && report_lock_live "$dir"; then
+		rm -rf -- "$new"
+		report_lock_refused "$parent/$base"
+		return 1
+	fi
+	guard="$dir.takeover"
+	if ! acquire_report_guard "$guard"; then
+		rm -rf -- "$new"
+		return 1
+	fi
+	if ! mv -T -- "$new" "$dir" 2>/dev/null; then
+		if report_lock_live "$dir"; then
+			if test "$force" -ne 1; then
+				rm -rf -- "$new"
+				rmdir -- "$guard"
+				report_lock_refused "$parent/$base"
+				return 1
+			fi
+			logw "Taking over the report directory from pid $COV_LOCK_PID (--force)."
+		else
+			logv "Removing a lock left by a run that is no longer alive: $dir"
+		fi
+		rm -rf -- "$dir"
+		if ! mv -T -- "$new" "$dir" 2>/dev/null; then
+			rm -rf -- "$new"
+			rmdir -- "$guard"
+			err "Could not lock the report directory: $dir"
+			return 1
+		fi
+	fi
+	rmdir -- "$guard"
+	COV_REPORT_CLEAN_LOCK="$dir"
+	COV_REPORT_TOKEN="$token"
+	return 0
+}
+
+# Remove the lock and every staging directory of a report that no live run
+# holds. Rollback directories are only reported: one holds the previous report
+# of a run that died while publishing, and deleting it would destroy it.
+clean_report_workspace() {
+	local parent="$1" base="$2" lock removed=0 p
+	lock="$(report_lock_path "$parent" "$base")"
+	if report_lock_live "$lock"; then
+		err "Report directory is in use by cov-analysis (pid $COV_LOCK_PID); nothing was removed."
+		return 1
+	fi
+	if test -d "$lock"; then
+		rm -rf -- "$lock" && {
+			log "Removed stale lock: $lock"
+			removed=$((removed + 1))
+		}
+	fi
+	if test -d "$lock.takeover"; then
+		rm -rf -- "$lock.takeover" &&
+			{
+				log "Removed a stale lock takeover guard: $lock.takeover"
+				removed=$((removed + 1))
+			}
+	fi
+	shopt -s nullglob
+	for p in "$lock.new."*; do
+		rm -rf -- "$p" && {
+			log "Removed a half-built lock: $p"
+			removed=$((removed + 1))
+		}
+	done
+	for p in "$parent/.$base.cov-analysis.stage."*; do
+		rm -rf -- "$p" && {
+			log "Removed stale staging directory: $p"
+			removed=$((removed + 1))
+		}
+	done
+	for p in "$parent/.$base.cov-analysis.rollback."*; do
+		logw "Left in place: $p"
+		logw "It holds the previous report of a run that died while publishing."
+	done
+	shopt -u nullglob
+	test "$removed" -gt 0 || log "Nothing to clean for $parent/$base"
+	return 0
+}
+
+# Validate an option's value. Prints error and exits 1 if $2 is missing or
+# begins with '-'. Usage: need_arg <opt-name> <value-or-empty>
+need_arg() {
+	local opt="$1" val="${2-}"
+	if test -z "$val"; then
+		err "Option $opt requires an argument"
+		exit 1
+	fi
+	case "$val" in
+	-*)
+		err "Option $opt requires an argument (got '$val' which looks like a flag)"
+		exit 1
+		;;
+	esac
+}
+
+# Echo the LLVM major version that tool selection should match, or nothing.
+# LLVM tools must match the clang that produced the .profraw, otherwise
+# `llvm-profdata merge` fails with a version mismatch. We derive the version
+# from the selected compiler so e.g. CC=clang-22 maps to llvm-profdata-22:
+#   1. an explicit version suffix in CC/CXX  (clang-22  -> 22)
+#   2. the version reported by the selected clang (CC, else plain `clang`)
+llvm_version_hint() {
+	local c base v out
+	for c in "${CC-}" "${CXX-}"; do
+		test -n "$c" || continue
+		base="$(basename -- "$c" 2>/dev/null)"
+		if [[ "$base" =~ -([0-9]+)$ ]]; then
+			echo "${BASH_REMATCH[1]}"
+			return 0
+		fi
+	done
+	c="${CC:-clang}"
+	command -v "$c" >/dev/null 2>&1 || return 0
+	out="$("$c" --version 2>/dev/null || true)"
+	case "$out" in
+	*'Apple clang'*) return 0 ;;
+	esac
+	v="$(printf '%s\n' "$out" | grep -oiE 'clang version [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+	test -n "$v" && echo "$v"
+	return 0
+}
+
+# Find an LLVM tool, preferring the version matching the selected clang
+# (see llvm_version_hint), then the bare name, then versioned (26 down to 11).
+find_tool() {
+	local tool="$1"
+	local ver hint
+	hint="$(llvm_version_hint)"
+	if test -n "$hint" && command -v "${tool}-${hint}" >/dev/null 2>&1; then
+		echo "${tool}-${hint}"
+		return 0
+	fi
+	if command -v "$tool" >/dev/null 2>&1; then
+		echo "$tool"
+		return 0
+	fi
+	for ver in 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11; do
+		if command -v "${tool}-${ver}" >/dev/null 2>&1; then
+			echo "${tool}-${ver}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Extract the instrumented binary path from a coverage command string.
+# Skips leading KEY=VALUE env assignments and @@ placeholders.
+extract_binary() {
+	local cmd="$1"
+	local token candidate="" rc=1
+	local -a tokens=()
+	[[ "$cmd" == *$'\n'* || "$cmd" == *$'\r'* ]] && return 1
+	case "$cmd" in
+	*[\'\"\\\;\|\&\<\>\(\)\{\}\[\]\$\`\!]*) return 1 ;;
+	esac
+	read -r -a tokens <<<"$cmd"
+	for token in "${tokens[@]}"; do
+		if test "$token" = "@@"; then
+			continue
+		fi
+		if [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+			test -n "$candidate" && return 1
+			continue
+		fi
+		case "$token" in
+		*)
+			if test -z "$candidate"; then
+				case "$(basename -- "$token" 2>/dev/null)" in
+				env | command | exec | nice | nohup | setsid | stdbuf | sudo | doas | chroot | timeout | bash | sh | dash | zsh | fish | python | python3 | perl | ruby | libtool | valgrind | rr | gdb | qemu-*) return 1 ;;
+				esac
+				candidate="$token"
+				rc=0
+			elif test -x "$token"; then
+				return 1
+			fi
+			;;
+		esac
+	done
+	test -n "$candidate" && printf '%s\n' "$candidate"
+	return $rc
+}
+
+resolve_coverage_binary() {
+	local cmd="$1" explicit="$2" resolved=""
+	if test -n "$explicit"; then
+		resolved="$explicit"
+	elif ! resolved="$(extract_binary "$cmd")"; then
+		err "Could not safely infer the coverage binary from: $cmd"
+		err "Use --binary <path> for quoted paths, wrappers, or shell syntax."
+		return 1
+	fi
+	if ! test -f "$resolved" || ! test -x "$resolved"; then
+		err "Coverage binary not found or not executable: $resolved"
+		return 1
+	fi
+	printf '%s\n' "$resolved"
+}
+
+# Return 0 if the binary was built from the cov-analysis driver
+# (coverage_driver.c). Such binaries embed a fixed signature string and read
+# their inputs from file arguments (the @@ placeholder), never from stdin.
+is_cov_driver_binary() {
+	local bin="$1"
+	test -n "$bin" || return 1
+	grep -qaF '###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###' "$bin" 2>/dev/null
+}
+
+cov_driver_can_repeat() {
+	local bin="$1"
+	test -n "$bin" || return 1
+	grep -qaF '###COV_DRIVER_REPEAT###' "$bin" 2>/dev/null
+}
+
+# If the coverage command has no @@ placeholder but the binary is a cov-analysis
+# driver (argv-only input), append @@ so the forgotten placeholder is supplied
+# automatically. Echoes the (possibly adjusted) command. A trailing @@ also lets
+# the replay use fast batch mode.
+add_at_if_driver() {
+	local cmd="$1" bin="$2"
+	case "$cmd" in
+	*@@*)
+		printf '%s' "$cmd"
+		return 0
+		;;
+	esac
+	if is_cov_driver_binary "$bin"; then
+		printf '%s @@' "$cmd"
+	else
+		printf '%s' "$cmd"
+	fi
+}
+
+resolve_batch_size() {
+	local cmd="$1" is_driver="$2" requested="${3:-}" last
+	last="${cmd##* }"
+	if test "$last" != "@@"; then
+		printf '0\n'
+		return 0
+	fi
+	if test -n "$requested"; then
+		if test "$requested" -le 1; then printf '0\n'; else printf '%d\n' "$requested"; fi
+		return 0
+	fi
+	if test "$is_driver" -eq 1; then
+		printf '%d\n' "$BATCH_SIZE_DEFAULT"
+	else
+		printf '0\n'
+	fi
+}
+
+has_visible_files() {
+	local d
+	for d in "$@"; do
+		test -d "$d" || continue
+		if find "$d" -maxdepth 1 -type f ! -name '.*' -print -quit 2>/dev/null | grep -q .; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Classify $AFL_DIR as one of:
+#   afl    — AFL++ layout: queue/crashes/hangs holding id:* entries, or a
+#            fuzzer_stats file beside them
+#   libafl — LibAFL layout: entries in corpus/ or queue/ beside a crashes/ or
+#            solutions/ directory, or with no non-hidden file beside them;
+#            or entries only in crashes/ or solutions/
+#   flat   — libFuzzer/libafl/honggfuzz flat corpus or crash dir (≥1 regular,
+#            non-hidden file)
+#   empty  — directory is empty or unreadable
+detect_fuzzer_layout() {
+	local p afl_stats=0
+	local -a afl_dirs=()
+	test -f "$AFL_DIR/fuzzer_stats" && afl_stats=1
+	shopt -s nullglob
+	for p in "$AFL_DIR/queue" "$AFL_DIR/crashes" "$AFL_DIR/hangs" \
+		"$AFL_DIR"/*/queue "$AFL_DIR"/*/crashes "$AFL_DIR"/*/hangs; do
+		test -d "$p" && afl_dirs+=("$p")
+	done
+	for p in "$AFL_DIR"/*/fuzzer_stats; do afl_stats=1; done
+	shopt -u nullglob
+	if test "${#afl_dirs[@]}" -gt 0; then
+		if test "$afl_stats" -eq 1 ||
+			find "${afl_dirs[@]}" -maxdepth 1 -type f -name 'id:*' -print -quit 2>/dev/null | grep -q .; then
+			echo "afl"
+			return 0
+		fi
+	fi
+	if has_visible_files "$AFL_DIR/corpus" "$AFL_DIR/queue"; then
+		if test -d "$AFL_DIR/crashes" || test -d "$AFL_DIR/solutions" ||
+			! has_visible_files "$AFL_DIR"; then
+			echo "libafl"
+			return 0
+		fi
+	fi
+	if has_visible_files "$AFL_DIR"; then
+		echo "flat"
+		return 0
+	fi
+	if has_visible_files "$AFL_DIR/crashes" "$AFL_DIR/solutions"; then
+		echo "libafl"
+		return 0
+	fi
+	echo "empty"
+}
+
+# Emit null-delimited queue/corpus file paths for the detected layout.
+# Reads globals: AFL_DIR, FUZZER_LAYOUT
+find_queue_files() {
+	case "${FUZZER_LAYOUT:-afl}" in
+	afl)
+		local paths=()
+		test -d "$AFL_DIR/queue" && paths+=("$AFL_DIR/queue")
+		local p
+		shopt -s nullglob
+		for p in "$AFL_DIR"/*/queue; do paths+=("$p"); done
+		shopt -u nullglob
+		if test "${#paths[@]}" -gt 0; then
+			find "${paths[@]}" -maxdepth 1 -type f -name 'id:*' -print0 2>/dev/null || true
+		fi
+		;;
+	libafl)
+		local paths=() p
+		for p in "$AFL_DIR/corpus" "$AFL_DIR/queue"; do
+			test -d "$p" && paths+=("$p")
+		done
+		if test "${#paths[@]}" -gt 0; then
+			find "${paths[@]}" -maxdepth 1 -type f ! -name '.*' -print0 2>/dev/null || true
+		fi
+		;;
+	flat)
+		# libFuzzer/libafl/honggfuzz flat corpus: every regular file that isn't
+		# hidden, a known crash artifact or a metadata file.
+		find "$AFL_DIR" -maxdepth 1 -type f \
+			! -name '.*' \
+			! -name 'crash-*' \
+			! -name 'leak-*' \
+			! -name 'oom-*' \
+			! -name 'timeout-*' \
+			! -name 'slow-unit-*' \
+			! -name 'SIG*.fuzz' \
+			! -name 'HONGGFUZZ.REPORT.TXT' \
+			-print0 2>/dev/null || true
+		;;
+	esac
+}
+
+# Emit null-delimited crash/timeout file paths for the detected layout.
+# Reads globals: AFL_DIR, FUZZER_LAYOUT
+find_crash_timeout_files() {
+	case "${FUZZER_LAYOUT:-afl}" in
+	afl)
+		local paths=()
+		test -d "$AFL_DIR/crashes" && paths+=("$AFL_DIR/crashes")
+		test -d "$AFL_DIR/hangs" && paths+=("$AFL_DIR/hangs")
+		local p
+		shopt -s nullglob
+		for p in "$AFL_DIR"/*/crashes; do paths+=("$p"); done
+		for p in "$AFL_DIR"/*/hangs; do paths+=("$p"); done
+		shopt -u nullglob
+		if test "${#paths[@]}" -gt 0; then
+			find "${paths[@]}" -maxdepth 1 -type f -name 'id:*' -print0 2>/dev/null || true
+		fi
+		;;
+	libafl)
+		local paths=() p
+		for p in "$AFL_DIR/crashes" "$AFL_DIR/solutions"; do
+			test -d "$p" && paths+=("$p")
+		done
+		if test "${#paths[@]}" -gt 0; then
+			find "${paths[@]}" -maxdepth 1 -type f ! -name '.*' -print0 2>/dev/null || true
+		fi
+		;;
+	flat)
+		# libFuzzer artifacts (crash-*/leak-*/oom-*/timeout-*/slow-unit-*)
+		# and honggfuzz crash files (SIG*.fuzz).
+		find "$AFL_DIR" -maxdepth 1 -type f \
+			\( -name 'crash-*' \
+			-o -name 'leak-*' \
+			-o -name 'oom-*' \
+			-o -name 'timeout-*' \
+			-o -name 'slow-unit-*' \
+			-o -name 'SIG*.fuzz' \) \
+			-print0 2>/dev/null || true
+		;;
+	esac
+}
+
+# Count null-delimited records from a file-list function
+count_files() {
+	"$@" | tr -cd '\0' | wc -c
+}
+
+# Parse a "FILE:LINE" target spec. Splits on the LAST ':' so paths that contain
+# colons still parse. Prints "FILE<TAB>LINE" and returns 0 on success; prints an
+# error and returns 1 on a malformed spec.
+parse_target_spec() {
+	local spec="$1" file line
+	case "$spec" in
+	*:*) ;;
+	*)
+		err "Target must be FILE:LINE (got '$spec')"
+		return 1
+		;;
+	esac
+	file="${spec%:*}"
+	line="${spec##*:}"
+	if test -z "$file"; then
+		err "Target FILE part is empty in '$spec'"
+		return 1
+	fi
+	case "$line" in
+	'' | *[!0-9]*)
+		err "Target LINE must be a positive integer (got '$line')"
+		return 1
+		;;
+	esac
+	if test "$line" -eq 0; then
+		err "Target LINE must be >= 1 (got '$line')"
+		return 1
+	fi
+	printf '%s\t%s\n' "$file" "$line"
+}
+
+# Classify a source line's coverage from LCOV text on stdin.
+# Args: FILE LINE. Prints exactly one of: covered | uncovered | absent.
+#   covered   — a matching DA:LINE,COUNT has COUNT > 0
+#   uncovered — a matching DA:LINE,COUNT exists with COUNT == 0
+#   absent    — no DA:LINE record in any matching SF: block
+# An SF: path matches FILE when it equals FILE or ends with "/FILE" (suffix
+# match with a path boundary). Returns 0 (state is on stdout).
+lcov_line_state() {
+	local file="$1" line="$2"
+	awk -v tf="$file" -v tl="$line" '
+    function endswith(s, suf,   ls, lsuf) {
+      ls = length(s); lsuf = length(suf);
+      return (ls >= lsuf && substr(s, ls - lsuf + 1) == suf);
+    }
+    /^SF:/ {
+      sf = substr($0, 4);
+      inmatch = (sf == tf) || endswith(sf, "/" tf);
+      next;
+    }
+    /^end_of_record/ { inmatch = 0; next }
+    inmatch && /^DA:/ {
+      split(substr($0, 4), a, ",");
+      if (a[1] == tl) {
+        seen = 1;
+        if (a[2] + 0 > 0) covered = 1;
+      }
+    }
+    END {
+      if (covered)    print "covered";
+      else if (seen)  print "uncovered";
+      else            print "absent";
+    }
+  '
+}
+
+# Emit the coverage replay driver C source
+emit_driver() {
+	cat <<'DRIVER_EOF'
+/* coverage_driver.c - Replay driver for LLVMFuzzerTestOneInput harnesses.
+ * Reads files from command-line arguments and calls LLVMFuzzerTestOneInput.
+ * Crash handler flushes coverage data on signals so crashing inputs still
+ * contribute to the report.
+ *
+ * Compile and link example:
+ *   clang -fprofile-instr-generate -fcoverage-mapping \
+ *     -c coverage_driver.c -o coverage_driver.o
+ *   clang -fprofile-instr-generate \
+ *     coverage_driver.o -L./build -ltarget -o cov
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+int LLVMFuzzerInitialize(int *argc, char ***argv) __attribute__((weak));
+int LLVMFuzzerTestOneInput(const unsigned char*, size_t);
+
+extern int __llvm_profile_write_file(void);
+extern int __llvm_profile_dump(void);
+extern void __llvm_profile_reset_counters(void);
+extern void __llvm_profile_set_filename(const char *);
+
+static void crash_handler(int sig) {
+    __llvm_profile_write_file();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+__attribute__((constructor))
+static void install_crash_handlers(void) {
+    const int sigs[] = { SIGABRT, SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTERM };
+    struct sigaction sa = {
+        .sa_handler = crash_handler,
+    };
+    sigfillset(&sa.sa_mask);
+    for (int i = 0; i < (int)(sizeof(sigs) / sizeof(sigs[0])); i++)
+        sigaction(sigs[i], &sa, NULL);
+}
+
+/* Per-input deadline, in seconds, from COV_INPUT_TIMEOUT (0 disables it).
+ * One process handles a whole batch of inputs, so an outer timeout can only
+ * kill the batch; this bounds each input on its own. An input that exceeds it
+ * is named on stderr and in the file COV_TIMEOUT_LOG points at, and the process
+ * ends at once with status 124: the harness may have been stopped while holding
+ * a lock, so nothing else, the profile writer included, is safe to run.
+ * cov-analysis replays the other inputs of the batch one per process. The
+ * handler makes only async-signal-safe calls, on messages prepared before each
+ * input.
+ */
+static unsigned input_timeout = 0;
+static const char *timeout_log = NULL;
+static char timeout_message[4352];
+static char timeout_line[4352];
+
+static void write_all(int fd, const char *s) {
+    size_t n = strlen(s);
+    while (n > 0) {
+        ssize_t w = write(fd, s, n);
+        if (w <= 0) return;
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+static void alarm_handler(int sig) {
+    int fd;
+    (void)sig;
+    write_all(2, timeout_message);
+    if (timeout_log) {
+        fd = open(timeout_log, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) {
+            write_all(fd, timeout_line);
+            close(fd);
+        }
+    }
+    _exit(124);
+}
+
+static void install_alarm_handler(void) {
+    const char *value = getenv("COV_INPUT_TIMEOUT");
+    struct sigaction sa;
+    if (!value || !*value) return;
+    input_timeout = (unsigned)strtoul(value, NULL, 10);
+    if (input_timeout == 0) return;
+    timeout_log = getenv("COV_TIMEOUT_LOG");
+    if (timeout_log && !*timeout_log) timeout_log = NULL;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alarm_handler;
+    sigfillset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, NULL);
+}
+
+static void run_one_input(const char *path, const unsigned char *buf, size_t len) {
+    if (input_timeout) {
+        snprintf(timeout_message, sizeof(timeout_message),
+                 "Error: timeout after %us: %s\n", input_timeout, path);
+        snprintf(timeout_line, sizeof(timeout_line), "%s\n", path);
+        alarm(input_timeout);
+    }
+    LLVMFuzzerTestOneInput(buf, len);
+    if (input_timeout) alarm(0);
+}
+
+static unsigned repeat_count = 0;
+static unsigned repeat_first = 1;
+static const char *repeat_dir = NULL;
+static const char *repeat_tag = NULL;
+static char repeat_scratch[4096];
+static char repeat_path[4096];
+
+static void install_repeat(void) {
+    const char *count = getenv("COV_REPEAT");
+    const char *first = getenv("COV_REPEAT_FIRST");
+    repeat_dir = getenv("COV_REPEAT_DIR");
+    repeat_tag = getenv("COV_REPEAT_TAG");
+    if (!count || !*count || !repeat_dir || !*repeat_dir || !repeat_tag || !*repeat_tag)
+        return;
+    if (first && *first) repeat_first = (unsigned)strtoul(first, NULL, 10);
+    snprintf(repeat_scratch, sizeof(repeat_scratch), "%s/scratch/%ld.profraw",
+             repeat_dir, (long)getpid());
+    repeat_count = (unsigned)strtoul(count, NULL, 10);
+}
+
+static void run_repeated(const char *path, const unsigned char *buf, size_t len,
+                         int pos) {
+    __llvm_profile_set_filename(repeat_scratch);
+    run_one_input(path, buf, len);
+    for (unsigned r = 0; r < repeat_count; r++) {
+        __llvm_profile_set_filename(repeat_scratch);
+        __llvm_profile_reset_counters();
+        run_one_input(path, buf, len);
+        snprintf(repeat_path, sizeof(repeat_path), "%s/run_%u/%s-%ld-%d.profraw",
+                 repeat_dir, repeat_first + r, repeat_tag, (long)getpid(), pos);
+        __llvm_profile_set_filename(repeat_path);
+        __llvm_profile_dump();
+    }
+    __llvm_profile_set_filename(repeat_scratch);
+}
+
+int main(int argc, char **argv) {
+    // needed for auto-detection in compiled binaries:
+    if (argc == 2 && strcmp(argv[1], "--printsignature") == 0) {
+        printf("###SIGNATURE_LLVMFUZZERTESTONEINPUT_COVERAGE###\n"
+               "###COV_DRIVER_REPEAT###\n");
+        return 0;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        char *resolved = realpath(argv[i], NULL);
+        if (resolved) argv[i] = resolved;
+    }
+
+    install_alarm_handler();
+    install_repeat();
+
+    if (LLVMFuzzerInitialize) {
+        fprintf(stderr, "Running LLVMFuzzerInitialize ...\n");
+        LLVMFuzzerInitialize(&argc, &argv);
+    }
+
+    int unusable = 0;
+    int empty = 0;
+
+    for (int i = 1; i < argc; i++) {
+        FILE *f = fopen(argv[i], "rb");
+        if (!f) {
+            fprintf(stderr, "Error: cannot open %s\n", argv[i]);
+            unusable++;
+            continue;
+        }
+        long len = -1;
+        if (fseek(f, 0, SEEK_END) == 0) len = ftell(f);
+        if (len < 0) {
+            fprintf(stderr, "Error: cannot size %s\n", argv[i]);
+            unusable++;
+            fclose(f);
+            continue;
+        }
+        if (len == 0) {
+            fprintf(stderr, "Warning: empty input: %s\n", argv[i]);
+            empty++;
+            fclose(f);
+            continue;
+        }
+        fseek(f, 0, SEEK_SET);
+        unsigned char *buf = (unsigned char *)malloc((size_t)len);
+        if (!buf) {
+            fprintf(stderr, "Error: out of memory for %s\n", argv[i]);
+            unusable++;
+            fclose(f);
+            continue;
+        }
+        size_t n_read = fread(buf, 1, (size_t)len, f);
+        if (n_read > 0) {
+            fprintf(stderr, "Running: %s (%d/%d) %zu bytes\n",
+                    argv[i], i, argc - 1, n_read);
+            if (repeat_count)
+                run_repeated(argv[i], (const unsigned char*)buf, n_read, i);
+            else
+                run_one_input(argv[i], (const unsigned char*)buf, n_read);
+        } else {
+            fprintf(stderr, "Error: read failed for %s\n", argv[i]);
+            unusable++;
+        }
+        free(buf);
+        fclose(f);
+    }
+
+    fprintf(stderr, "Done. %d input(s), %d unusable, %d empty.\n",
+            argc - 1, unusable, empty);
+    return unusable ? 2 : 0;
+}
+DRIVER_EOF
+}
+
+# ── usage ─────────────────────────────────────────────────────────────────────
+
+usage_main() {
+	cat <<'EOF'
+Usage: cov-analysis [command] [options]
+
+Commands:
+  report      Generate coverage report from AFL++ corpus (DEFAULT)
+  build       Build target with LLVM coverage instrumentation
+  driver      Emit coverage_driver.c for LLVMFuzzerTestOneInput harnesses
+  diff        Compare coverage between two llvm-cov JSON exports
+  stability   Analyze corpus stability (per-line non-deterministic hit counts)
+  search      List corpus entries that reach a given FILE:LINE
+
+Run 'cov-analysis <command> --help' for command-specific options.
+
+Global options:
+  -V          Print version and exit
+  -h, --help  Print this help and exit
+EOF
+
+	echo ""
+	echo "Help for default command \"report\" (does not need to be specified):"
+	echo ""
+	usage_report
+}
+
+usage_report() {
+	cat <<'EOF'
+Usage: cov-analysis [report] [options]
+
+Required:
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
+
+Multiple campaigns:
+  Repeat -d/-e to analyze several harnesses in one run. Each -d starts a new
+  campaign; -e, --binary and --name attach to the campaign started by the most
+  recent -d. A single -d/-e pair behaves exactly as before. With two or more,
+  <-o> holds one full report per campaign, a union report over all of them
+  (every binary is passed to llvm-cov as its own object), and a per-file
+  attribution table naming the best campaign per file and the lines only one
+  campaign reached. Campaign binaries built from different sources are
+  reported: llvm-cov keeps one coverage mapping and drops the functions that
+  differ, which would under-report the union.
+
+Optional:
+  --name <name>      Directory name for the campaign started by the last -d
+                     (default: the basename of that directory)
+  -o <dir>           Report output directory (default: <afl-dir>/cov)
+  -t <num>           Parallel replay workers/forks (default: 1)
+  -T <secs>          Timeout in seconds for crash/timeout replay (default: 5)
+                     Timed targets receive TERM, then KILL after 1 second.
+  --queue-timeout <secs>
+                     Per-input timeout in seconds for QUEUE/corpus replay
+                     (-T covers crash and timeout inputs only). Default: derived
+                     from the campaign — the largest slowest_exec_ms across the
+                     AFL++ fuzzer_stats files, rounded up to a whole second and
+                     multiplied by 5 (minimum 5s), because the coverage binary
+                     has no forkserver, runs -O1 with counters and writes a
+                     profile per exec. 60s when there is no fuzzer_stats to read.
+                     0 disables the deadline (a corpus that holds one input which
+                     does not terminate then pins a worker forever). Inputs that
+                     hit it are listed in <-o>/slow_inputs.txt.
+  --batch <num>      Replay <num> queue inputs per process instead of one.
+                     The per-input cost of replay is a fork, an exec and a full
+                     profile write sized by the binary's counter count, not by
+                     the input; batching amortises all three and is what makes a
+                     corpus of several hundred thousand entries finish. Requires
+                     a coverage command ending in @@ (the file list is appended
+                     to it) and a target that accepts several input files on
+                     argv — a cov-analysis driver, a libFuzzer binary, or a
+                     hand-written argv loop. Default: 128 for a cov-analysis
+                     driver binary, otherwise one input per process. 0 or 1
+                     forces one input per process. Above ~128 there is nothing
+                     measurable left to win. A batch that exits non-zero or is
+                     killed at its deadline is discarded and its inputs are
+                     replayed one per process, so a crashing or hanging input
+                     costs no other input its coverage; the run reports how many
+                     batches were replayed that way. On a binary that is not
+                     a cov-analysis driver there is no per-input alarm, so an
+                     input that does not terminate holds its batch until the
+                     batch deadline: the queue timeout times <num>, but at most
+                     10 times the queue timeout.
+  --force            Take over a report directory another run holds. The old
+                     run cannot publish or remove the new owner's lock.
+  --clean            Remove the lock and staging directories of <-o> that no
+                     running cov-analysis holds, then exit. A staging directory
+                     survives a killed run; this is how to clear one safely.
+  --binary <path>    Instrumented binary used by LLVM and driver detection.
+                     Required when -e contains a quoted binary path, wrapper,
+                     or other shell syntax that cannot be inferred safely.
+  --layout <kind>    Force layout: 'afl', 'libafl' or 'flat' (default:
+                     auto-detect)
+  --max-replay-failures <pct>
+                     Fail the run when more than <pct> percent of the queue
+                     inputs did not replay cleanly (default: 99, so a corpus in
+                     which every input failed is fatal — that means the target
+                     never processed its inputs and the coverage is wrong).
+                     Crash and timeout inputs are exempt: they are expected to
+                     die. Pass 100 for targets that legitimately exit non-zero
+                     for rejected inputs. Inputs are always handed to the target
+                     as absolute paths, so a target that changes its working
+                     directory still finds them.
+  --ignore-regex <r> Filename regex to exclude from llvm-cov reports
+                     (default: /usr/include/)
+  --reachability <p> Cross-reference fuzz-reachability output and annotate the
+                     HTML and text reports in place. <p> is its JSON report, its
+                     output directory (reachability.json when present, else
+                     reached.txt/not_reached.txt), or a single sancov
+                     allow/ignore .txt list. In the HTML file view each
+                     function is tinted: dark grey = statically unreachable
+                     (expected dead), amber = reachable but not reached (the
+                     actionable gap), purple = covered yet flagged unreachable;
+                     covered code keeps llvm-cov's coloring. The text source view
+                     gets a per-line U/R/A marker column, and summary.txt gains a
+                     reachability tally plus the list of functions to cover.
+                     The Function/Line/Region/Branch coverage numbers in
+                     index.html and summary.txt are recomputed to EXCLUDE
+                     statically-unreachable functions, so dead code no longer
+                     drags the percentages down. (The HTML index is rendered
+                     flat — without directory grouping — so its numbers can be
+                     rewritten reliably.) Invalid input, per-function metrics,
+                     or annotation failures make the report command fail.
+  --replay-only      Replay and merge, write coverage.profdata into <-o>, and
+                     stop without rendering a report. Use it to replay a corpus
+                     where it lives and carry back only the merged profile.
+  --profdata <file>  Render from profile data instead of replaying a corpus.
+                     Repeatable; several profiles are merged into one report.
+                     Needs -o and the instrumented binary (--binary or -e), and
+                     -d is not used. Also re-renders an existing report with a
+                     different --ignore-regex or fresh --reachability data.
+  --remote <host>    Replay on [user@]host and fetch only the merged profile,
+                     instead of copying the corpus here. -d and -e name paths
+                     on that host; --binary names the matching LOCAL binary,
+                     used for rendering, and -o is required. cov-analysis
+                     copies itself over, runs --replay-only there, brings back
+                     coverage.profdata, and removes its remote working
+                     directory however the run ends. A replay still running
+                     there after Ctrl-C or a dropped connection is stopped
+                     first. Needs ssh and scp.
+  --ssh-opts <opts>  Options handed to both ssh and scp (e.g.
+                     "-o Port=2222 -o IdentityFile=~/.ssh/fuzz"). Use the
+                     -o Key=Value form: ssh and scp disagree about -p. Quote a
+                     value that contains spaces, as the shell would:
+                     "-o 'IdentityFile=/keys/fuzz key'".
+  --remote-dir <dir> Parent for a private remote working directory; existing
+                     contents are preserved (default: mktemp -d under the
+                     remote TMPDIR)
+  --migrate-existing-report
+                     Replace a complete pre-marker cov-analysis report after a
+                     successful staged run. Without this explicit option, a
+                     non-empty output directory must contain
+                     .cov-analysis-report. New and empty directories are safe.
+  -v                 Verbose output
+  -q                 Quiet mode (suppress all [+] output)
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
+
+Examples:
+  # Standard AFL++ replay with file-based input
+  cov-analysis -d out -e "./cov @@"
+
+  # Cross-reference reachability so unreached-but-reachable functions stand out
+  cov-analysis -d out -e "./cov @@" --reachability ../reachability/test.json
+
+  # With env vars, custom report dir, 1s timeout
+  cov-analysis -d out -e "LD_LIBRARY_PATH=./lib ./cov @@" -o coverage -T 1
+
+  cov-analysis -d out -e 'env MODE=cov "/opt/my app/cov" @@' \
+    --binary "/opt/my app/cov"
+
+  # A corpus with slow entries: bound each queue input explicitly
+  cov-analysis -d out -e "./cov @@" --queue-timeout 30
+
+  # Do NOT wrap the target in `timeout -s KILL` to bound it yourself. Batch
+  # replay puts many inputs in one process, so SIGKILL discards the profile of
+  # the whole batch, which then has to be replayed one input per process, and a
+  # wrapper in -e also forces --binary. Use --queue-timeout; if you must wrap,
+  # wrap as `timeout -k 5 15` so the driver still flushes its profile on TERM.
+
+  # Clear what a killed run left behind, then re-run
+  cov-analysis -d out -o coverage --clean
+
+  # Replay coverage with 8 parallel workers
+  cov-analysis -d out -e "./cov @@" -t 8
+
+  # A large corpus through a libFuzzer binary: batch it, or pay a fork, an exec
+  # and a full profile write per input (only a cov-analysis driver batches
+  # by itself)
+  cov-analysis -d out -e "./fuzzer @@" --binary ./fuzzer --batch 128 -t 8
+
+  # Several harnesses over one library: per-harness, union, and attribution
+  cov-analysis -d out-parser -e "./cov-parser @@" --name parser \
+               -d out-decoder -e "./cov-decoder @@" --name decoder \
+               -o coverage
+
+  # Replay on the machine that holds the corpus, render where you read it
+  cov-analysis -d out -e "./cov @@" -o profile --replay-only
+  cov-analysis --profdata profile/coverage.profdata --binary ./cov -o coverage
+
+  # The same in one command, over ssh: no corpus is copied
+  cov-analysis --remote fuzzbox -d /fuzz/out -e "/fuzz/cov @@" \
+    --binary ./cov -o coverage
+
+  # stdin input (binary reads from stdin)
+  cov-analysis -d out -e "./cov"
+
+  # Exclude test files and system headers from report
+  cov-analysis -d out -e "./cov @@" --ignore-regex '(/usr/include/|/test/)'
+
+  # libFuzzer corpus (flat directory of corpus files)
+  cov-analysis -d ./corpus -e "./cov @@"
+
+  # libafl corpus (flat directory of corpus files), stdin method
+  cov-analysis -d ./corpus -e "./cov"
+
+  # honggfuzz workspace (corpus + SIG*.fuzz crash files)
+  cov-analysis -d ./hfuzz-workdir -e "./cov @@"
+EOF
+}
+
+usage_build() {
+	cat <<'EOF'
+Usage: cov-analysis build <build-command> [args...]
+
+  Resolves CC/CXX, appends LLVM coverage options to existing CFLAGS,
+  CXXFLAGS, CPPFLAGS, and LDFLAGS, then runs the build command, e.g.:
+    cov-analysis build ./configure --disable-shared
+    cov-analysis build make -j$(nproc)
+
+  Set CC and/or CXX to override auto-detection. A missing counterpart is
+  derived for clang, clang-N, clang++, or clang++-N, including absolute paths.
+  Set both variables when using custom wrappers.
+
+  The report/search/stability commands pick llvm-profdata / llvm-cov to match
+  the selected clang version (e.g. CC=clang-22 -> llvm-profdata-22), so raw
+  profiles merge without a version mismatch. Keep CC/CXX consistent between
+  building and reporting, or set CC to the versioned clang when reporting.
+
+Options:
+  -h, --help    Show this help
+  -V            Print version and exit
+EOF
+}
+
+usage_driver() {
+	cat <<'EOF'
+Usage: cov-analysis driver [-o output.c]
+
+  Emits coverage_driver.c source to stdout (or to -o FILE).
+  Use this for LLVMFuzzerTestOneInput harnesses to replay corpus files.
+
+  The driver loops over all file arguments, calls LLVMFuzzerTestOneInput
+  for each, and installs a crash handler that flushes profiling data so
+  crashing inputs can contribute to the coverage report. Crash-time flushing
+  is best effort: __llvm_profile_write_file() is not async-signal-safe and may
+  fail after severe memory corruption. The original signal is re-raised.
+
+  Every input path is resolved to an absolute path before the harness runs, so
+  a harness that changes its working directory still finds its inputs. Inputs
+  that cannot be read are reported on stderr and make the driver exit 2; empty
+  inputs are reported but are not an error. cov-analysis report treats that
+  exit 2 as a failed measurement rather than a target failure.
+
+  With COV_INPUT_TIMEOUT=<secs> set, an input that runs longer is named on
+  stderr and the driver exits at once with status 124; cov-analysis replays
+  the rest of that batch one input per process.
+
+  Under cov-analysis stability the driver runs each input several times in
+  one process and writes one profile per run (COV_REPEAT), so the analysis
+  sees state the harness carries between executions.
+
+Options:
+  -o <file>     Write driver source to FILE instead of stdout
+  -h, --help    Show this help
+  -V            Print version and exit
+
+Example:
+  cov-analysis driver -o coverage_driver.c
+  clang -fprofile-instr-generate -fcoverage-mapping \
+    coverage_driver.c -L./build -ltarget -o cov
+EOF
+}
+
+usage_diff() {
+	cat <<'EOF'
+Usage: cov-analysis diff [-o <report-dir>] [--only-changed] [--reachability <path>] [<OLD_JSON> <NEW_JSON>]
+
+  Compare coverage between two llvm-cov JSON exports and generate an
+  HTML diff report showing newly covered, lost, and still-uncovered
+  lines and functions.
+
+  Arguments:
+    OLD_JSON  Path to the baseline coverage JSON
+              (default: <report-dir>/coverage_old.json)
+    NEW_JSON  Path to the updated coverage JSON
+              (default: <report-dir>/coverage.json)
+
+Options:
+  -o <dir>           Report directory for default-path lookups and HTML output
+                     (default: .). The HTML is written to <dir>/coverage_diff.html.
+  --reachability <p> Cross-reference fuzz-reachability output (its JSON report,
+                     its output directory — reachability.json when present,
+                     else reached.txt/not_reached.txt — or a sancov
+                     allow/ignore .txt list). Splits the "still uncovered
+                     functions" list into reachable (amber, actionable) and
+                     unreachable (grey, expected dead).
+  --only-changed     Omit unchanged files. By default the full report includes
+                     unchanged files and their still-uncovered lines/functions.
+  -h, --help         Print this help and exit
+EOF
+}
+
+usage_stability() {
+	cat <<'EOF'
+Usage: cov-analysis stability [options]
+
+  Run each corpus input N times with LLVM coverage, collect per-line hit
+  counts, and flag lines where counts vary across runs as "unstable."
+  Reports a stability percentage. If instability is found with the default
+  4 runs, reruns for a total of 8 to confirm.
+
+  A cov-analysis driver binary runs each input N+1 times in a row in one
+  process and records every run but the first, the way AFL++ calibrates an
+  input in persistent mode. State a harness carries from one execution to the
+  next (a static counter, a cache, a growing buffer) therefore shows up as
+  instability, while one-time initialization in the first run does not. Other
+  binaries, and drivers built before this mode existed, run every execution in
+  a fresh process, which cannot see such state; --isolated selects that for a
+  driver binary too.
+
+  Resilient to flaky passes: a pass whose profiles cannot be collected or
+  merged (e.g. a crashing input that left a truncated .profraw behind) is
+  skipped and the run continues with the remaining passes, as long as at
+  least 2 passes succeed.
+
+  Macro definition lines are listed separately: llvm-cov attributes every
+  expansion to the line of the #define, so a macro used from varying call sites
+  is reported as one unstable line in a header, which is not a location to fix.
+  The split needs python3 and the JSON export; without python3 it is skipped.
+
+  Every analyzed pass measures the same inputs. An input killed at the -T
+  deadline never writes its profile and so contributes nothing to that pass;
+  such inputs are excluded from ALL passes and reported, because comparing
+  passes that measured different inputs reports instability that does not
+  exist. The verdict therefore does not depend on -t. If no input survives
+  every pass, the run fails instead of reporting a meaningless number.
+
+Required:
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
+
+Optional:
+  -n <num>           Number of runs per corpus pass (default: 4)
+  -s <prefix>        Only consider source lines whose file path contains
+                     this prefix (e.g. -s src/)
+  --exclude-regex <re>
+                     Drop source files whose path matches this regex, applied
+                     on top of -s (e.g. --exclude-regex '\.h$')
+  -t <num>           Parallel replay workers (default: 1)
+  -T <secs>          Per-input timeout in seconds (default: 5)
+                     Timed targets receive TERM, then KILL after 1 second.
+  --binary <path>    Instrumented binary used by LLVM and driver detection;
+                     required for ambiguous -e shell commands.
+  --isolated         Run every execution in a fresh process, also for a
+                     cov-analysis driver binary. Measures per-input
+                     determinism only.
+  --layout <kind>    Force layout: 'afl', 'libafl' or 'flat' (default:
+                     auto-detect)
+  -v                 Verbose output
+  -q                 Quiet mode (suppress all [+] output)
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
+
+Examples:
+  cov-analysis stability -d out -e "./cov @@"
+  cov-analysis stability -d out -e "./cov @@" --isolated
+  cov-analysis stability -d out -e "./cov @@" -n 8 -s src/
+  cov-analysis stability -d out -e "./cov @@" --exclude-regex '\.h$'
+  cov-analysis stability -d ./corpus -e "./cov @@" -t 4
+EOF
+}
+
+usage_search() {
+	cat <<'EOF'
+Usage: cov-analysis search FILE:LINE -d <dir> -e "<cmd>" [options]
+
+  Report which corpus entries reach a given source line. Each input is replayed
+  in isolation through the coverage binary; an input "reaches" FILE:LINE when its
+  line-execution count for that line is > 0.
+
+  Matching input paths are printed to stdout (one per line, sorted), so the
+  output pipes cleanly. Progress and the summary go to stderr. If some inputs
+  cannot be analyzed, matching paths are still printed with an incomplete-result
+  warning. The command fails if no inputs can be analyzed.
+
+Required:
+  FILE:LINE   Source location, e.g. src/foo.c:123 (single line; split on last ':')
+  -d <dir>    Fuzzing output directory (AFL++, libFuzzer, libafl, or honggfuzz)
+  -e <cmd>    Coverage command. Use @@ as input file placeholder.
+              Omit @@ to feed input via stdin instead. For a cov-analysis
+              driver binary (which reads files, not stdin), @@ is appended
+              automatically when omitted.
+
+Optional:
+  --crashes          Also scan crash and timeout inputs (default: corpus only)
+  -t <num>           Parallel workers for the per-input scan (default: 1)
+  -T <secs>          Per-input replay timeout in seconds (default: 5)
+                     Applies to every selected input in both union and isolated
+                     replay; targets receive TERM, then KILL after 1 second.
+  --binary <path>    Instrumented binary used by LLVM and driver detection;
+                     required for ambiguous -e shell commands.
+  --layout <kind>    Force layout: 'afl', 'libafl' or 'flat' (default:
+                     auto-detect)
+  -v                 Verbose output
+  -q                 Quiet mode (suppress all [+] output)
+  -V                 Print version and exit
+  -h, --help         Print this help and exit
+
+Examples:
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@"
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@" --crashes -t 8
+  cov-analysis search src/parser.c:142 -d ./corpus -e "./cov"     # stdin input
+
+  # Feed the reaching inputs into another tool:
+  cov-analysis search src/parser.c:142 -d out -e "./cov @@" | xargs -I{} cp {} ./hits/
+EOF
+}
+
+# ── command: build ────────────────────────────────────────────────────────────
+
+cmd_build() {
+	if test $# -eq 0; then
+		usage_build
+		exit 1
+	fi
+	case "$1" in
+	-h | --help)
+		usage_build
+		exit 0
+		;;
+	-V)
+		version_string
+		exit 0
+		;;
+	esac
+
+	# Build mode: refuse if an AFL++ compiler is already set. Match on basename
+	# against the known afl-* wrappers rather than a substring search, so paths
+	# like /opt/waffle/bin/clang do not trigger a false positive.
+	local _cc_base _cxx_base
+	_cc_base="$(basename -- "${CC-}" 2>/dev/null || true)"
+	_cxx_base="$(basename -- "${CXX-}" 2>/dev/null || true)"
+	case "$_cc_base $_cxx_base" in
+	*afl-clang* | *afl-gcc* | *afl-g++* | *afl-cc* | *afl-c++*)
+		err "AFL++ compiler is set in CC/CXX — unset it before building a coverage binary."
+		exit 1
+		;;
+	esac
+
+	if test -z "${CC-}" && test -z "${CXX-}"; then
+		if command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; then
+			CC=clang
+			CXX=clang++
+		else
+			local ver
+			for ver in 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11; do
+				if command -v "clang-$ver" >/dev/null 2>&1 &&
+					command -v "clang++-$ver" >/dev/null 2>&1; then
+					CC="clang-$ver"
+					CXX="clang++-$ver"
+					break
+				fi
+			done
+		fi
+	elif test -n "${CC-}" && test -z "${CXX-}"; then
+		if ! CXX="$(paired_clang "$CC" cxx)"; then
+			err "Cannot derive CXX from CC='$CC'. Set both CC and CXX for custom compiler wrappers."
+			exit 1
+		fi
+	elif test -z "${CC-}" && test -n "${CXX-}"; then
+		if ! CC="$(paired_clang "$CXX" cc)"; then
+			err "Cannot derive CC from CXX='$CXX'. Set both CC and CXX for custom compiler wrappers."
+			exit 1
+		fi
+	fi
+
+	if test -z "${CC-}" || test -z "${CXX-}"; then
+		err "A complete Clang compiler pair was not found. Install clang/clang++ or set both CC and CXX."
+		exit 1
+	fi
+	if ! command -v "$CC" >/dev/null 2>&1; then
+		err "C compiler not found or not executable: $CC"
+		exit 1
+	fi
+	if ! command -v "$CXX" >/dev/null 2>&1; then
+		err "C++ compiler not found or not executable: $CXX"
+		exit 1
+	fi
+	export CC CXX
+	echo "[+] Using compiler: ${CC-} / ${CXX-}" >&2
+
+	append_env_flags CFLAGS "-fprofile-instr-generate -fcoverage-mapping"
+	append_env_flags CXXFLAGS "-fprofile-instr-generate -fcoverage-mapping"
+	append_env_flags CPPFLAGS "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1"
+	append_env_flags LDFLAGS "-fprofile-instr-generate"
+
+	exec "$@"
+}
+
+# ── command: driver ──────────────────────────────────────────────────────────
+
+cmd_driver() {
+	case "${1-}" in
+	-h | --help)
+		usage_driver
+		exit 0
+		;;
+	-V)
+		version_string
+		exit 0
+		;;
+	esac
+
+	if test "${1-}" = "-o"; then
+		need_arg "-o" "${2-}"
+		emit_driver >"$2"
+		echo "[+] coverage_driver.c written to: $2" >&2
+	else
+		emit_driver
+	fi
+	exit 0
+}
+
+# ── command: stability ───────────────────────────────────────────────────────
+
+cmd_stability() {
+	local AFL_DIR=""
+	local COVERAGE_CMD=""
+	local RUNS=4
+	local SOURCE_FILTER=""
+	local FORKS=1
+	local TIMEOUT=5
+	local LLVM_PROFDATA=""
+	local LLVM_COV=""
+	local STAB_DIR=""
+	local COV_BINARY=""
+	local BINARY_OVERRIDE=""
+	local USER_RUNS="" # set if -n was explicitly provided
+	local FUZZER_LAYOUT="${FUZZER_LAYOUT:-}"
+	local GAWK=""
+	local STAB_KEPT=0 # inputs that produced coverage in every analyzed pass
+	local EXCLUDE_FILTER=""
+	local ISOLATED=0
+	local STAB_INPROC=0
+	local STAB_ROUNDS=0
+
+	if test $# -eq 0; then
+		usage_stability
+		exit 1
+	fi
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		-d)
+			need_arg "-d" "${2-}"
+			AFL_DIR="$2"
+			shift 2
+			;;
+		-e)
+			need_arg "-e" "${2-}"
+			COVERAGE_CMD="$2"
+			shift 2
+			;;
+		-n)
+			need_arg "-n" "${2-}"
+			RUNS="$2"
+			USER_RUNS="1"
+			shift 2
+			;;
+		-s)
+			need_arg "-s" "${2-}"
+			SOURCE_FILTER="$2"
+			shift 2
+			;;
+		--exclude-regex)
+			need_arg "--exclude-regex" "${2-}"
+			EXCLUDE_FILTER="$2"
+			shift 2
+			;;
+		-t)
+			need_arg "-t" "${2-}"
+			FORKS="$2"
+			shift 2
+			;;
+		-T)
+			need_arg "-T" "${2-}"
+			TIMEOUT="$2"
+			shift 2
+			;;
+		--binary)
+			need_arg "--binary" "${2-}"
+			BINARY_OVERRIDE="$2"
+			shift 2
+			;;
+		--isolated)
+			ISOLATED=1
+			shift
+			;;
+		-v)
+			VERBOSE=1
+			shift
+			;;
+		-q)
+			QUIET=1
+			shift
+			;;
+		-V)
+			version_string
+			exit 0
+			;;
+		-h | --help)
+			usage_stability
+			exit 0
+			;;
+		--layout)
+			need_arg "--layout" "${2-}"
+			FUZZER_LAYOUT="$2"
+			shift 2
+			;;
+		*)
+			err "Unknown option: $1"
+			echo "" >&2
+			usage_stability >&2
+			exit 1
+			;;
+		esac
+	done
+
+	# ── validate inputs ────────────────────────────────────────────────────────
+	if test -z "$AFL_DIR"; then
+		err "Must specify input directory with -d"
+		exit 1
+	fi
+	if test -z "$COVERAGE_CMD"; then
+		err "Must specify coverage command with -e"
+		exit 1
+	fi
+	if ! test -d "$AFL_DIR"; then
+		err "Input directory does not exist: $AFL_DIR"
+		exit 1
+	fi
+	case "$RUNS" in
+	'' | *[!0-9]* | 0 | 1)
+		err "Run count (-n) must be a positive integer >= 2: $RUNS"
+		exit 1
+		;;
+	esac
+	case "$FORKS" in
+	'' | *[!0-9]* | 0)
+		err "Replay worker count must be a positive integer: $FORKS"
+		exit 1
+		;;
+	esac
+	case "$TIMEOUT" in
+	'' | *[!0-9]* | 0)
+		err "Timeout (-T) must be a positive integer in seconds: $TIMEOUT"
+		exit 1
+		;;
+	esac
+
+	if test -n "$FUZZER_LAYOUT"; then
+		case "$FUZZER_LAYOUT" in
+		afl | libafl | flat) ;;
+		*)
+			err "--layout must be 'afl', 'libafl' or 'flat' (got '$FUZZER_LAYOUT')"
+			exit 1
+			;;
+		esac
+	fi
+
+	require_replay_commands "cov-analysis stability" || exit 1
+	AFL_DIR="$(resolve_input_dir "$AFL_DIR")" || exit 1
+
+	COV_BINARY="$(resolve_coverage_binary "$COVERAGE_CMD" "$BINARY_OVERRIDE")" || exit 1
+	logv "Coverage binary : $COV_BINARY"
+
+	# Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+	COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
+	logv "Replay command  : $COVERAGE_CMD"
+
+	if test "$ISOLATED" -eq 0 && is_cov_driver_binary "$COV_BINARY"; then
+		if cov_driver_can_repeat "$COV_BINARY"; then
+			STAB_INPROC=1
+		else
+			logw "$COV_BINARY was built with an older cov-analysis driver that cannot"
+			logw "repeat an input in one process, so every execution runs in a fresh process"
+			logw "and state carried between executions stays invisible. Rebuild it with the"
+			logw "current 'cov-analysis driver' output to see it."
+		fi
+	fi
+
+	# ── detect LLVM tools ──────────────────────────────────────────────────────
+	LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
+		err "llvm-profdata not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	LLVM_COV="$(find_tool llvm-cov)" || {
+		err "llvm-cov not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	log "LLVM tools      : $LLVM_PROFDATA, $LLVM_COV"
+
+	# Stability aggregation needs gawk (multi-dim arrays, ARGIND). mawk and
+	# busybox awk will not work. Prefer an explicit `gawk` binary if the
+	# system `awk` is not gawk.
+	if awk --version 2>/dev/null | grep -qi '^GNU Awk'; then
+		GAWK="awk"
+	elif command -v gawk >/dev/null 2>&1; then
+		GAWK="gawk"
+	else
+		err "cov-analysis stability requires GNU awk (gawk)."
+		err "Install it (apt install gawk / dnf install gawk)."
+		exit 1
+	fi
+	logv "Using gawk      : $GAWK"
+
+	# ── detect or honor fuzzer layout ──────────────────────────────────────────
+	if test -z "$FUZZER_LAYOUT"; then
+		FUZZER_LAYOUT="$(detect_fuzzer_layout)"
+	fi
+	case "$FUZZER_LAYOUT" in
+	afl) log "Fuzzer layout   : AFL++ (queue/crashes/hangs)" ;;
+	flat) log "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
+	libafl) log "Fuzzer layout   : LibAFL (corpus|queue, crashes|solutions)" ;;
+	empty)
+		err "No input files found in $AFL_DIR"
+		err "Expected one of: AFL++ or LibAFL output dir, libFuzzer/libafl corpus, honggfuzz workspace."
+		err "Override detection with --layout afl|libafl|flat if needed."
+		exit 1
+		;;
+	esac
+
+	# ── prepare workspace ──────────────────────────────────────────────────────
+	STAB_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-stability.XXXXXX")"
+	COV_REPORT_CLEAN_PROFRAW="$STAB_DIR"
+	install_cleanup_traps
+
+	local CORPUS_SIZE
+	CORPUS_SIZE=$(count_files find_queue_files)
+	if test "$CORPUS_SIZE" -eq 0; then
+		err "No corpus files found in $AFL_DIR"
+		exit 1
+	fi
+
+	log "Input directory : $AFL_DIR"
+	log "Corpus size     : $CORPUS_SIZE inputs"
+	log "Coverage binary : $COV_BINARY"
+	log "Runs            : $RUNS"
+	_stab_replay_text() {
+		if test "$STAB_INPROC" -eq 0; then
+			printf 'one process per execution'
+		elif test "$STAB_ROUNDS" -le 1; then
+			printf 'each input %d times in one process, the first run unrecorded' "$((RUNS + 1))"
+		else
+			printf 'each input in %d processes of %d runs, the first run of each unrecorded' \
+				"$STAB_ROUNDS" "$((RUNS / STAB_ROUNDS + 1))"
+		fi
+	}
+	log "Replay          : $(_stab_replay_text)"
+	test -n "$SOURCE_FILTER" && log "Source filter   : $SOURCE_FILTER"
+	test -n "$EXCLUDE_FILTER" && log "Exclude filter  : $EXCLUDE_FILTER"
+
+	# Number every input once and reuse that numbering for all passes: the index
+	# prefixes each input's .profraw files, so a pass's profile set identifies
+	# exactly which inputs contributed to it (and PID reuse can no longer let one
+	# input overwrite another's counts).
+	find_queue_files | number_inputs >"$STAB_DIR/inputs.manifest"
+
+	# Replay one pass and record which input indices produced a profile.
+	# Returns 1 for a pass that produced nothing at all, so the caller can skip it.
+	_stab_replay_pass() {
+		local idx="$1"
+		local run_dir="$STAB_DIR/run_${idx}"
+		local stats p_total=0 p_ok=0 p_failed=0 p_killed=0 p_unreadable=0
+		mkdir -p "$run_dir"
+
+		log "Collecting pass $idx/$RUNS..."
+		export -f run_with_timeout command_for_input run_input_command \
+			run_input_command_unbounded replay_one_input
+		stats="$(xargs -0 -r -n 1 -P "$FORKS" \
+			bash -c 'replay_one_input "$1" "$2" "$3" "$4"' \
+			_ "$COVERAGE_CMD" "$TIMEOUT" "$run_dir" \
+			<"$STAB_DIR/inputs.manifest" 2>/dev/null | replay_tally 0 || true)"
+		read -r p_total p_ok p_failed p_killed p_unreadable <<<"$stats" || true
+		logv "Pass $idx: $p_ok ok, $p_failed failed, $p_killed timed out (of $p_total)"
+
+		_stab_collect_present "$idx"
+	}
+
+	_stab_collect_present() {
+		local idx="$1"
+		find "$STAB_DIR/run_${idx}" -maxdepth 1 -type f -name '*.profraw' -print |
+			"$GAWK" -F/ '{ n = $NF; sub(/-.*/, "", n); if (n ~ /^[0-9]+$/) print n }' |
+			sort -u >"$STAB_DIR/run_${idx}.present"
+
+		if ! test -s "$STAB_DIR/run_${idx}.present"; then
+			err "No .profraw files generated in pass $idx; skipping it."
+			return 1
+		fi
+		return 0
+	}
+
+	_stab_replay_round() {
+		local first="$1" last="$2" idx count
+		local stats p_total=0 p_ok=0 p_failed=0 p_killed=0 p_unreadable=0
+		if test "$STAB_INPROC" -eq 0; then
+			for idx in $(seq "$first" "$last"); do
+				if _stab_replay_pass "$idx"; then
+					stab_replayed+=("$idx")
+				fi
+			done
+			return 0
+		fi
+
+		count=$((last - first + 1))
+		STAB_ROUNDS=$((STAB_ROUNDS + 1))
+		for idx in $(seq "$first" "$last"); do mkdir -p "$STAB_DIR/run_${idx}"; done
+		mkdir -p "$STAB_DIR/scratch"
+		log "Collecting passes $first-$last..."
+		export COV_REPEAT="$count" COV_REPEAT_FIRST="$first" COV_REPEAT_DIR="$STAB_DIR" \
+			COV_INPUT_TIMEOUT="$TIMEOUT"
+		export -f run_with_timeout command_for_input run_input_command \
+			run_input_command_unbounded record_slow_input replay_one_input \
+			replay_one_input_repeated
+		stats="$(xargs -0 -r -n 1 -P "$FORKS" \
+			bash -c 'replay_one_input_repeated "$1" "$2" "$3" "$4"' \
+			_ "$COVERAGE_CMD" "$(((count + 1) * TIMEOUT))" "$STAB_DIR/scratch" \
+			<"$STAB_DIR/inputs.manifest" 2>/dev/null | replay_tally 0 || true)"
+		unset COV_REPEAT COV_REPEAT_FIRST COV_REPEAT_DIR COV_INPUT_TIMEOUT
+		read -r p_total p_ok p_failed p_killed p_unreadable <<<"$stats" || true
+		logv "Passes $first-$last: $p_ok ok, $p_failed failed, $p_killed timed out (of $p_total)"
+
+		for idx in $(seq "$first" "$last"); do
+			if _stab_collect_present "$idx"; then
+				stab_replayed+=("$idx")
+			fi
+		done
+	}
+
+	# Restrict analysis to the inputs that produced coverage in EVERY analyzed
+	# pass: an input killed at the deadline contributes nothing to that pass, and
+	# comparing passes that measured different inputs reports instability that
+	# does not exist.
+	_stab_refresh_common() {
+		local indices=("$@") n="${#indices[@]}" i kept
+		local present=()
+		for i in "${indices[@]}"; do present+=("$STAB_DIR/run_${i}.present"); done
+		"$GAWK" -v need="$n" '{ seen[$0]++ }
+      END { for (k in seen) if (seen[k] == need) print k }' \
+			"${present[@]}" | sort >"$STAB_DIR/common.idx"
+		kept=$(grep -c . "$STAB_DIR/common.idx" || true)
+		STAB_KEPT="$kept"
+		if test "$kept" -eq 0; then
+			err "No input produced coverage in all $n analyzed passes."
+			err "Raise the deadline with -T, lower the worker count with -t, or drop the inputs that time out."
+			exit 1
+		fi
+		if test "$kept" -lt "$CORPUS_SIZE"; then
+			log "Excluded $((CORPUS_SIZE - kept)) of $CORPUS_SIZE inputs that did not produce coverage in every pass"
+		fi
+	}
+
+	# Merge, export and parse one pass, counting only the common input set.
+	# Returns 1 for an unusable pass so the caller can skip it.
+	_stab_prepare_pass() {
+		local idx="$1"
+		local run_dir="$STAB_DIR/run_${idx}"
+		local manifest="$run_dir/merge.manifest"
+
+		find "$run_dir" -maxdepth 1 -type f -name '*.profraw' -print |
+			"$GAWK" -v keep="$STAB_DIR/common.idx" -F/ '
+          BEGIN { while ((getline line < keep) > 0) want[line] = 1 }
+          { n = $NF; sub(/-.*/, "", n); if (n in want) print }' |
+			sort >"$manifest"
+		if ! test -s "$manifest"; then
+			err "Pass $idx holds no profile for the common input set; skipping it."
+			return 1
+		fi
+		logv "Pass $idx: merging $(grep -c . "$manifest") profraw file(s)..."
+
+		# --failure-mode=all: tolerate individual corrupt/truncated .profraw files
+		# (drop them, keep the valid ones); only fail if every profile is invalid.
+		merge_profiles "$LLVM_PROFDATA" "$run_dir" \
+			"$STAB_DIR/merged_run_${idx}.profdata" all "$manifest" 2>/dev/null || {
+			err "llvm-profdata merge failed for pass $idx; skipping it."
+			return 1
+		}
+
+		logv "Pass $idx: exporting LCOV..."
+		"$LLVM_COV" export "$COV_BINARY" \
+			--format=lcov \
+			"-instr-profile=$STAB_DIR/merged_run_${idx}.profdata" \
+			>"$STAB_DIR/run_${idx}.lcov" 2>/dev/null || {
+			err "llvm-cov export (lcov) failed for pass $idx; skipping it."
+			return 1
+		}
+
+		logv "Pass $idx: parsing hit counts..."
+		awk -v filter="$SOURCE_FILTER" -v exclude="$EXCLUDE_FILTER" '
+      /^SF:/ { file = substr($0, 4) }
+      /^DA:/ {
+        if (filter != "" && index(file, filter) == 0) next
+        if (exclude != "" && file ~ exclude) next
+        split(substr($0, 4), a, ",")
+        print file ":" a[1] "\t" a[2]
+      }
+    ' "$STAB_DIR/run_${idx}.lcov" | sort >"$STAB_DIR/run_${idx}.hits"
+		return 0
+	}
+
+	# stab_replayed holds the passes that produced any profile at all;
+	# stab_passes those that also yielded usable per-line hit counts. Failed
+	# passes are skipped instead of aborting the run.
+	local stab_replayed=()
+	local stab_passes=()
+	local run_idx
+	_stab_replay_round 1 "$RUNS"
+
+	log "Collected all data, analyzing ..."
+
+	# Comparing hit counts across runs needs at least two successful passes.
+	if test "${#stab_replayed[@]}" -lt 2; then
+		err "Only ${#stab_replayed[@]} of $RUNS pass(es) produced coverage data — need at least 2 to assess stability."
+		err "Check that the binary is instrumented with -fprofile-instr-generate (see 'cov-analysis build')."
+		exit 1
+	fi
+
+	_stab_refresh_common "${stab_replayed[@]}"
+	for run_idx in "${stab_replayed[@]}"; do
+		if _stab_prepare_pass "$run_idx"; then
+			stab_passes+=("$run_idx")
+		fi
+	done
+
+	if test "${#stab_passes[@]}" -lt 2; then
+		err "Only ${#stab_passes[@]} of $RUNS pass(es) produced coverage data — need at least 2 to assess stability."
+		err "Check that the binary is instrumented with -fprofile-instr-generate (see 'cov-analysis build')."
+		exit 1
+	fi
+	if test "${#stab_passes[@]}" -lt "$RUNS"; then
+		err "$((RUNS - ${#stab_passes[@]})) of $RUNS pass(es) failed and were skipped; analyzing the ${#stab_passes[@]} that succeeded."
+	fi
+
+	# ── stability analysis ─────────────────────────────────────────────────────
+	# Args: the run indices of the successful passes (e.g. 1 3 4). Reads the
+	# matching run_<idx>.hits files from $STAB_DIR. Uses gawk ARGIND (1..n in
+	# argument order) to track which file each record belongs to.
+	# Outputs: one "file:linenum" per unstable line, then "STABILITY_STATS S T".
+	_stab_analyze() {
+		local indices=("$@")
+		local n="${#indices[@]}"
+		local hit_files=()
+		local i
+		for i in "${indices[@]}"; do
+			hit_files+=("$STAB_DIR/run_${i}.hits")
+		done
+		"$GAWK" -F '\t' -v n="$n" '
+      { counts[$1][ARGIND] = $2 }
+      END {
+        total = 0; stable_count = 0
+        for (key in counts) {
+          any = 0
+          for (i = 1; i <= n; i++) {
+            val = (i in counts[key]) ? counts[key][i] + 0 : 0
+            if (val > 0) any = 1
+          }
+          if (!any) continue
+          total++
+          ref = (1 in counts[key]) ? counts[key][1] + 0 : 0
+          stable = 1
+          for (i = 2; i <= n; i++) {
+            val = (i in counts[key]) ? counts[key][i] + 0 : 0
+            if (val != ref) { stable = 0; break }
+          }
+          if (stable) { stable_count++ }
+          else { print key }
+        }
+        printf "STABILITY_STATS %d %d\n", stable_count, total
+      }
+    ' "${hit_files[@]}"
+	}
+
+	log "Analyzing stability across ${#stab_passes[@]} runs..."
+	local analysis_out
+	analysis_out="$(_stab_analyze "${stab_passes[@]}")"
+
+	local stable_count total_lines unstable_lines
+	stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
+	total_lines=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
+	# grep -v exits 1 (and, under pipefail, aborts) when every line is the
+	# STABILITY_STATS record — i.e. when coverage is perfectly stable. Tolerate it.
+	unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V || true)"
+	: "${stable_count:=0}" "${total_lines:=0}"
+
+	# ── extend to double the runs if instability found (default -n only) ───────
+	if test -n "$unstable_lines" && test -z "$USER_RUNS"; then
+		local extra_end=$((RUNS * 2))
+		log "Instability detected, extending from $RUNS to $extra_end runs..."
+		_stab_replay_round $((RUNS + 1)) "$extra_end"
+		RUNS="$extra_end"
+
+		# The added passes can shrink the common input set, so every pass is
+		# re-merged against the refreshed set before the second analysis.
+		_stab_refresh_common "${stab_replayed[@]}"
+		stab_passes=()
+		for run_idx in "${stab_replayed[@]}"; do
+			if _stab_prepare_pass "$run_idx"; then
+				stab_passes+=("$run_idx")
+			fi
+		done
+		if test "${#stab_passes[@]}" -lt 2; then
+			err "Only ${#stab_passes[@]} of $RUNS pass(es) produced coverage data — need at least 2 to assess stability."
+			exit 1
+		fi
+
+		log "Re-analyzing stability across ${#stab_passes[@]} runs..."
+		analysis_out="$(_stab_analyze "${stab_passes[@]}")"
+		stable_count=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $2}')
+		total_lines=$(printf '%s\n' "$analysis_out" | awk '/^STABILITY_STATS/{print $3}')
+		unstable_lines="$(printf '%s\n' "$analysis_out" | grep -v '^STABILITY_STATS' | sort -V || true)"
+		: "${stable_count:=0}" "${total_lines:=0}"
+	fi
+
+	# ── separate macro definition lines from real locations ────────────────────
+	# llvm-cov attributes every expansion to the line of the #define, so a macro
+	# used from varying call sites is reported as one unstable line in a header —
+	# a non-location. Needs the JSON export; without python3 the split is skipped.
+	local macro_lines="" plain_lines="$unstable_lines"
+	if test -n "$unstable_lines" && command -v python3 >/dev/null 2>&1; then
+		if _stab_macro_sites "$STAB_DIR/merged_run_${stab_passes[0]}.profdata" \
+			>"$STAB_DIR/macro.map" 2>/dev/null && test -s "$STAB_DIR/macro.map"; then
+			plain_lines="$(printf '%s\n' "$unstable_lines" | awk -F '\t' '
+        NR == FNR { m[$1] = $2; next }
+        !($0 in m)' "$STAB_DIR/macro.map" -)"
+			macro_lines="$(printf '%s\n' "$unstable_lines" | awk -F '\t' '
+        NR == FNR { m[$1] = $2; next }
+        ($0 in m) { printf "  %s  (%d expansion site%s)\n", $0, m[$0],
+                           (m[$0] == 1 ? "" : "s") }' "$STAB_DIR/macro.map" -)"
+		fi
+	fi
+
+	# ── collapse consecutive unstable lines into ranges ────────────────────────
+	local ranges=""
+	if test -n "$plain_lines"; then
+		ranges="$(printf '%s\n' "$plain_lines" | awk '
+      BEGIN { prev_file = ""; prev_line = -999; range_start = -999 }
+      {
+        n = split($0, parts, ":")
+        linenum = parts[n] + 0
+        file = $0; sub(":" parts[n] "$", "", file)
+
+        if (file != prev_file || linenum != prev_line + 1) {
+          if (prev_file != "") {
+            if (range_start == prev_line) printf "  %s:%d\n", prev_file, range_start
+            else printf "  %s:%d-%d\n", prev_file, range_start, prev_line
+          }
+          prev_file = file
+          range_start = linenum
+        }
+        prev_line = linenum
+      }
+      END {
+        if (prev_file != "") {
+          if (range_start == prev_line) printf "  %s:%d\n", prev_file, range_start
+          else printf "  %s:%d-%d\n", prev_file, range_start, prev_line
+        }
+      }
+    ')"
+	fi
+
+	# ── print report ───────────────────────────────────────────────────────────
+	local unstable_count=$((total_lines - stable_count))
+	local pct
+	if test "$total_lines" -gt 0; then
+		pct="$(awk -v s="$stable_count" -v t="$total_lines" \
+			'BEGIN { printf "%.1f%%", 100.0 * s / t }')"
+	else
+		pct="n/a"
+	fi
+
+	if test "$QUIET" -eq 0; then
+		echo ""
+		echo "Stability Report"
+		echo "--------------------------------------------------------"
+		printf "Corpus size : %s inputs\n" "$CORPUS_SIZE"
+		if test "$STAB_KEPT" -lt "$CORPUS_SIZE"; then
+			printf "Inputs used : %d of %d (%d excluded: no coverage in every pass)\n" \
+				"$STAB_KEPT" "$CORPUS_SIZE" "$((CORPUS_SIZE - STAB_KEPT))"
+		fi
+		if test "${#stab_passes[@]}" -eq "$RUNS"; then
+			printf "Runs        : %s\n" "$RUNS"
+		else
+			printf "Runs        : %d analyzed (%d of %d failed and were skipped)\n" \
+				"${#stab_passes[@]}" "$((RUNS - ${#stab_passes[@]}))" "$RUNS"
+		fi
+		printf "Replay      : %s\n" "$(_stab_replay_text)"
+		printf "Stability   : %s (%d/%d executed lines stable)\n" \
+			"$pct" "$stable_count" "$total_lines"
+
+		if test -n "$unstable_lines"; then
+			echo ""
+			printf "~~ Variable-count lines (%d lines):\n" "$unstable_count"
+			echo "   Lines with varying hit counts:"
+			echo ""
+			if test -n "$ranges"; then
+				printf '%s\n' "$ranges"
+			else
+				echo "  (none outside macro definitions)"
+			fi
+			if test -n "$macro_lines"; then
+				echo ""
+				echo "   Macro definitions - llvm-cov attributes every expansion to the #define,"
+				echo "   so these vary with their call sites and are not locations to fix:"
+				echo ""
+				printf '%s\n' "$macro_lines"
+			fi
+			echo ""
+			echo "[!] Unstable coverage detected."
+		else
+			echo ""
+			echo "[+] All executed lines are perfectly stable."
+		fi
+	fi
+}
+
+# ── command: search ────────────────────────────────────────────────────────
+
+# Replay ALL selected inputs into one profraw dir for the union pre-check.
+# Every queue/corpus/crash/timeout input gets the same -T hard deadline.
+# Reads globals: COVERAGE_CMD, FORKS, TIMEOUT, INCLUDE_CRASHES.
+_search_replay_union() {
+	local outdir="$1"
+	export -f run_with_timeout command_for_input run_input_command \
+		run_input_command_unbounded record_slow_input replay_one_input \
+		_search_union_one_input
+	if ! find_queue_files | number_inputs | xargs -0 -r -n 1 -P "$FORKS" \
+		bash -c '_search_union_one_input "$1" "$2" "$3" "$4"' \
+		_ "$COVERAGE_CMD" "$TIMEOUT" "$outdir" >/dev/null 2>&1; then
+		return 1
+	fi
+
+	if test "$INCLUDE_CRASHES" -eq 1; then
+		mkdir -p "$outdir/crash"
+		if ! find_crash_timeout_files | number_inputs | xargs -0 -r -n 1 -P "$FORKS" \
+			bash -c '_search_union_one_input "$1" "$2" "$3" "$4"' \
+			_ "$COVERAGE_CMD" "$TIMEOUT" "$outdir/crash" >/dev/null 2>&1; then
+			return 1
+		fi
+	fi
+}
+
+_search_union_one_input() {
+	local cmd="$1" seconds="$2" outdir="$3" record="$4" idx path
+	idx="${record%%$'\t'*}"
+	path="${record#*$'\t'}"
+	replay_one_input "$cmd" "$seconds" "$outdir" "$record" >/dev/null
+	if compgen -G "$outdir/${idx}-"'*.profraw' >/dev/null 2>&1; then
+		return 0
+	fi
+	printf '%s\0' "$path" >>"$COV_SEARCH_UNION_ERROR_LOG"
+	return 1
+}
+
+# Per-input worker for the parallel scan. Replays ONE input in isolation, merges
+# its profile, and prints the input path iff the target line is `covered`.
+# The input path is $1; all other config is read from exported COV_SEARCH_* env
+# vars (cmd_search exports them before the xargs fan-out). This function and
+# lcov_line_state are `export -f`'d so the xargs `bash -c` subshells can call them.
+# Records analysis success and failure so the caller can label partial results.
+_search_one_input() {
+	local in="$1" work state="absent" failure=""
+	if ! work="$(mktemp -d "${COV_SEARCH_WORKROOT}/w.XXXXXX")"; then
+		printf '%s\0' "$in" >>"$COV_SEARCH_ERROR_LOG"
+		return 1
+	fi
+	export LLVM_PROFILE_FILE="$work/cov-%p.profraw"
+
+	run_input_command "$COV_SEARCH_TIMEOUT" "$COV_SEARCH_CMD" "$in" >/dev/null 2>&1 || true
+
+	if compgen -G "$work/cov-"'*.profraw' >/dev/null 2>&1; then
+		if merge_profiles "$COV_SEARCH_PROFDATA" "$work" "$work/m.profdata" 2>/dev/null; then
+			if "$COV_SEARCH_COV" export "$COV_SEARCH_BIN" --format=lcov \
+				"-instr-profile=$work/m.profdata" >"$work/input.lcov" 2>/dev/null; then
+				state="$(lcov_line_state "$COV_SEARCH_FILE" "$COV_SEARCH_LINE" <"$work/input.lcov")" ||
+					failure="could not inspect LCOV output"
+			else
+				failure="llvm-cov export failed"
+			fi
+		else
+			failure="llvm-profdata merge failed"
+		fi
+	else
+		failure="no coverage profile was produced"
+	fi
+
+	rm -rf "$work"
+	if test -n "$failure"; then
+		printf '%s\0' "$in" >>"$COV_SEARCH_ERROR_LOG"
+		return 1
+	fi
+	printf '%s\0' "$in" >>"$COV_SEARCH_OK_LOG"
+	test "$state" = "covered" && printf '%s\n' "$in"
+	return 0
+}
+
+cmd_search() {
+	local AFL_DIR=""
+	local COVERAGE_CMD=""
+	local TARGET_SPEC=""
+	local FORKS=1
+	local TIMEOUT=5
+	local INCLUDE_CRASHES=0
+	local LLVM_PROFDATA=""
+	local LLVM_COV=""
+	local COV_BINARY=""
+	local BINARY_OVERRIDE=""
+	local FUZZER_LAYOUT="${FUZZER_LAYOUT:-}"
+	local TARGET_FILE="" TARGET_LINE=""
+
+	if test $# -eq 0; then
+		usage_search
+		exit 1
+	fi
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		-d)
+			need_arg "-d" "${2-}"
+			AFL_DIR="$2"
+			shift 2
+			;;
+		-e)
+			need_arg "-e" "${2-}"
+			COVERAGE_CMD="$2"
+			shift 2
+			;;
+		-t)
+			need_arg "-t" "${2-}"
+			FORKS="$2"
+			shift 2
+			;;
+		-T)
+			need_arg "-T" "${2-}"
+			TIMEOUT="$2"
+			shift 2
+			;;
+		--binary)
+			need_arg "--binary" "${2-}"
+			BINARY_OVERRIDE="$2"
+			shift 2
+			;;
+		--crashes)
+			INCLUDE_CRASHES=1
+			shift
+			;;
+		-v)
+			VERBOSE=1
+			shift
+			;;
+		-q)
+			QUIET=1
+			shift
+			;;
+		-V)
+			version_string
+			exit 0
+			;;
+		-h | --help)
+			usage_search
+			exit 0
+			;;
+		--layout)
+			need_arg "--layout" "${2-}"
+			FUZZER_LAYOUT="$2"
+			shift 2
+			;;
+		-*)
+			err "Unknown option: $1"
+			echo "" >&2
+			usage_search >&2
+			exit 1
+			;;
+		*)
+			if test -n "$TARGET_SPEC"; then
+				err "Unexpected extra argument: $1 (only one FILE:LINE target is allowed)"
+				exit 1
+			fi
+			TARGET_SPEC="$1"
+			shift
+			;;
+		esac
+	done
+
+	# ── validate inputs ──────────────────────────────────────────────────────
+	if test -z "$TARGET_SPEC"; then
+		err "Must specify a FILE:LINE target (e.g. src/foo.c:123)"
+		exit 1
+	fi
+	if test -z "$AFL_DIR"; then
+		err "Must specify input directory with -d"
+		exit 1
+	fi
+	if test -z "$COVERAGE_CMD"; then
+		err "Must specify coverage command with -e"
+		exit 1
+	fi
+	if ! test -d "$AFL_DIR"; then
+		err "Input directory does not exist: $AFL_DIR"
+		exit 1
+	fi
+	case "$FORKS" in
+	'' | *[!0-9]* | 0)
+		err "Replay worker count must be a positive integer: $FORKS"
+		exit 1
+		;;
+	esac
+	case "$TIMEOUT" in
+	'' | *[!0-9]* | 0)
+		err "Timeout (-T) must be a positive integer in seconds: $TIMEOUT"
+		exit 1
+		;;
+	esac
+	if test -n "$FUZZER_LAYOUT"; then
+		case "$FUZZER_LAYOUT" in
+		afl | libafl | flat) ;;
+		*)
+			err "--layout must be 'afl', 'libafl' or 'flat' (got '$FUZZER_LAYOUT')"
+			exit 1
+			;;
+		esac
+	fi
+
+	# Parse and split the target spec.
+	local parsed
+	parsed="$(parse_target_spec "$TARGET_SPEC")" || exit 1
+	TARGET_FILE="${parsed%$'\t'*}"
+	TARGET_LINE="${parsed##*$'\t'}"
+
+	require_replay_commands "cov-analysis search" || exit 1
+	AFL_DIR="$(resolve_input_dir "$AFL_DIR")" || exit 1
+	COV_BINARY="$(resolve_coverage_binary "$COVERAGE_CMD" "$BINARY_OVERRIDE")" || exit 1
+
+	# Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+	COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
+	logv "Replay command  : $COVERAGE_CMD"
+
+	# ── detect LLVM tools ────────────────────────────────────────────────────
+	LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
+		err "llvm-profdata not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	LLVM_COV="$(find_tool llvm-cov)" || {
+		err "llvm-cov not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	loge "LLVM tools      : $LLVM_PROFDATA, $LLVM_COV"
+
+	# ── detect or honor fuzzer layout ────────────────────────────────────────
+	if test -z "$FUZZER_LAYOUT"; then
+		FUZZER_LAYOUT="$(detect_fuzzer_layout)"
+	fi
+	case "$FUZZER_LAYOUT" in
+	afl) loge "Fuzzer layout   : AFL++ (queue/crashes/hangs)" ;;
+	flat) loge "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
+	libafl) loge "Fuzzer layout   : LibAFL (corpus|queue, crashes|solutions)" ;;
+	empty)
+		err "No input files found in $AFL_DIR"
+		err "Expected one of: AFL++ or LibAFL output dir, libFuzzer/libafl corpus, honggfuzz workspace."
+		err "Override detection with --layout afl|libafl|flat if needed."
+		exit 1
+		;;
+	esac
+
+	# ── count selected inputs ────────────────────────────────────────────────
+	local QUEUE_COUNT CRASH_COUNT=0 TOTAL
+	QUEUE_COUNT=$(count_files find_queue_files)
+	if test "$INCLUDE_CRASHES" -eq 1; then
+		CRASH_COUNT=$(count_files find_crash_timeout_files)
+	fi
+	TOTAL=$((QUEUE_COUNT + CRASH_COUNT))
+	if test "$TOTAL" -eq 0; then
+		if test "$INCLUDE_CRASHES" -eq 1; then
+			err "No selected regular input files found in $AFL_DIR"
+		else
+			err "No corpus files found in $AFL_DIR"
+		fi
+		exit 1
+	fi
+
+	loge "Target          : $TARGET_FILE:$TARGET_LINE"
+	loge "Inputs to scan  : $TOTAL (queue=$QUEUE_COUNT, crashes/timeouts=$CRASH_COUNT)"
+
+	# ── workspace ──────────────────────────────────────────────────────────────
+	local SEARCH_DIR
+	SEARCH_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-search.XXXXXX")"
+	COV_REPORT_CLEAN_PROFRAW="$SEARCH_DIR"
+	install_cleanup_traps
+
+	# ── union pre-check ────────────────────────────────────────────────────────
+	loge "Union pre-check : replaying $TOTAL input(s) to test reachability..."
+	local UNION_DIR="$SEARCH_DIR/union"
+	mkdir -p "$UNION_DIR"
+	export COV_SEARCH_UNION_ERROR_LOG="$SEARCH_DIR/union-errors.list"
+	: >"$COV_SEARCH_UNION_ERROR_LOG"
+	local union_ready=1
+	if ! _search_replay_union "$UNION_DIR"; then
+		local union_error_count
+		union_error_count=$(tr -cd '\0' <"$COV_SEARCH_UNION_ERROR_LOG" | wc -c)
+		err "Warning: union pre-check failed for $union_error_count of $TOTAL selected inputs; scanning inputs individually."
+		union_ready=0
+	fi
+
+	if test "$union_ready" -eq 1; then
+		local praw_count
+		praw_count=$(find "$UNION_DIR" -name '*.profraw' -printf . 2>/dev/null | wc -c)
+		if test "$praw_count" -eq 0; then
+			err "Warning: union pre-check produced no coverage profiles; scanning inputs individually."
+			union_ready=0
+		fi
+	fi
+
+	local union_state="absent"
+	if test "$union_ready" -eq 1 &&
+		! merge_profiles "$LLVM_PROFDATA" "$UNION_DIR" "$UNION_DIR/m.profdata" 2>/dev/null; then
+		err "Warning: union profile merge failed; scanning inputs individually."
+		union_ready=0
+	fi
+	if test "$union_ready" -eq 1 &&
+		! "$LLVM_COV" export "$COV_BINARY" --format=lcov \
+			"-instr-profile=$UNION_DIR/m.profdata" >"$UNION_DIR/union.lcov" 2>/dev/null; then
+		err "Warning: union llvm-cov export failed; scanning inputs individually."
+		union_ready=0
+	fi
+	if test "$union_ready" -eq 1 &&
+		! union_state="$(lcov_line_state "$TARGET_FILE" "$TARGET_LINE" <"$UNION_DIR/union.lcov")"; then
+		err "Warning: could not inspect union LCOV output; scanning inputs individually."
+		union_ready=0
+	fi
+
+	if test "$union_ready" -eq 1 && test "$union_state" != "covered"; then
+		if test "$union_state" = "uncovered"; then
+			logerr "$TARGET_FILE:$TARGET_LINE is executable but no selected input reaches it."
+			test "$INCLUDE_CRASHES" -eq 0 &&
+				logerr "(retry with --crashes to also scan crash/timeout inputs)"
+		else
+			logerr "$TARGET_FILE:$TARGET_LINE is not in the coverage data."
+			logerr "The path or line number may be wrong, or the line is non-executable."
+		fi
+		logerr "0 of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
+		exit 0
+	fi
+
+	# ── per-input scan ───────────────────────────────────────────────────────
+	loge "Scanning $TOTAL input(s) individually (workers=$FORKS)..."
+	export COV_SEARCH_CMD="$COVERAGE_CMD" \
+		COV_SEARCH_BIN="$COV_BINARY" \
+		COV_SEARCH_PROFDATA="$LLVM_PROFDATA" \
+		COV_SEARCH_COV="$LLVM_COV" \
+		COV_SEARCH_TIMEOUT="$TIMEOUT" \
+		COV_SEARCH_FILE="$TARGET_FILE" \
+		COV_SEARCH_LINE="$TARGET_LINE" \
+		COV_SEARCH_WORKROOT="$SEARCH_DIR" \
+		COV_SEARCH_ERROR_LOG="$SEARCH_DIR/errors.list" \
+		COV_SEARCH_OK_LOG="$SEARCH_DIR/analyzed.list"
+	: >"$COV_SEARCH_ERROR_LOG"
+	: >"$COV_SEARCH_OK_LOG"
+	export -f _search_one_input lcov_line_state run_with_timeout command_for_input \
+		run_input_command write_profile_manifest merge_profiles
+
+	local scan_status=0
+	if ! {
+		find_queue_files
+		test "$INCLUDE_CRASHES" -eq 1 && find_crash_timeout_files
+		true
+	} | xargs -0 -r -n 1 -P "$FORKS" \
+		bash -c '_search_one_input "$1"' _ |
+		sort >"$SEARCH_DIR/matches.txt"; then
+		scan_status=1
+	fi
+
+	local match_count analyzed_count error_count
+	# grep -c prints 0 and exits 1 on an empty file; `|| true` keeps that single
+	# "0" without appending a second one (which `|| echo 0` would do).
+	match_count=$(grep -c . "$SEARCH_DIR/matches.txt" 2>/dev/null || true)
+	: "${match_count:=0}"
+	analyzed_count=$(tr -cd '\0' <"$COV_SEARCH_OK_LOG" | wc -c)
+	error_count=$(tr -cd '\0' <"$COV_SEARCH_ERROR_LOG" | wc -c)
+
+	cat "$SEARCH_DIR/matches.txt"
+	if test "$scan_status" -ne 0 || test "$error_count" -ne 0 ||
+		test "$analyzed_count" -ne "$TOTAL"; then
+		err "Warning: search results incomplete: $analyzed_count of $TOTAL inputs analyzed; $error_count failed. $match_count matching input(s) shown."
+		if test "$analyzed_count" -eq 0; then return 1; fi
+		return 0
+	fi
+	loge "$match_count of $TOTAL inputs reach $TARGET_FILE:$TARGET_LINE"
+	exit 0
+}
+
+reach_py_lib() {
+	cat <<'REACHPY'
+import os
+import re
+import sys
+from typing import Dict, Set, Tuple
+
+_RUST_DISAMBIG = re.compile(r'17h[0-9a-f]{16}E$')
+_V0_MAX_DEPTH = 256
+_V0_DIGITS = frozenset('0123456789')
+_V0_ALPHA = frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ')
+_V0_ALNUM = _V0_DIGITS | _V0_ALPHA
+_V0_HEX = frozenset('0123456789abcdef')
+_V0_PATH_TAGS = frozenset('CMXYNIB')
+
+
+class _V0Symbol:
+    def __init__(self, name):
+        self.s = name
+        self.pos = 0
+        self.depth = 0
+
+    def peek(self):
+        return self.s[self.pos] if self.pos < len(self.s) else ''
+
+    def eat(self, c):
+        if self.peek() != c:
+            return False
+        self.pos += 1
+        return True
+
+    def base62(self):
+        while self.peek() in _V0_ALNUM:
+            self.pos += 1
+        return self.eat('_')
+
+    def hex_data(self):
+        while self.peek() in _V0_HEX:
+            self.pos += 1
+        return self.eat('_')
+
+    def undisambiguated_identifier(self):
+        self.eat('u')
+        if self.peek() not in _V0_DIGITS:
+            return False
+        length = 0
+        if not self.eat('0'):
+            while self.peek() in _V0_DIGITS:
+                length = length * 10 + int(self.s[self.pos])
+                self.pos += 1
+                if length > len(self.s):
+                    return False
+        self.eat('_')
+        if length > len(self.s) - self.pos:
+            return False
+        self.pos += length
+        return True
+
+    def identifier(self):
+        if self.eat('s') and not self.base62():
+            return False
+        return self.undisambiguated_identifier()
+
+    def impl_path(self):
+        if self.eat('s') and not self.base62():
+            return False
+        return self.path()
+
+    def namespace(self):
+        if self.peek() not in _V0_ALPHA:
+            return False
+        self.pos += 1
+        return True
+
+    def path(self):
+        self.depth += 1
+        tag = self.peek()
+        ok = self.depth <= _V0_MAX_DEPTH and tag in _V0_PATH_TAGS
+        if ok:
+            self.pos += 1
+            if tag == 'C':
+                ok = self.identifier()
+            elif tag == 'M':
+                ok = self.impl_path() and self.type()
+            elif tag == 'X':
+                ok = self.impl_path() and self.type() and self.path()
+            elif tag == 'Y':
+                ok = self.type() and self.path()
+            elif tag == 'N':
+                ok = self.namespace() and self.path() and self.identifier()
+            elif tag == 'I':
+                ok = self.path()
+                while ok and not self.eat('E'):
+                    ok = self.generic_arg()
+            else:
+                ok = self.base62()
+        self.depth -= 1
+        return ok
+
+    def generic_arg(self):
+        if self.eat('L'):
+            return self.base62()
+        if self.eat('K'):
+            return self.constant()
+        return self.type()
+
+    def type(self):
+        self.depth += 1
+        tag = self.peek()
+        if self.depth > _V0_MAX_DEPTH:
+            ok = False
+        elif 'a' <= tag <= 'z':
+            self.pos += 1
+            ok = True
+        elif tag == 'A':
+            self.pos += 1
+            ok = self.type() and self.constant()
+        elif tag in ('S', 'P', 'O'):
+            self.pos += 1
+            ok = self.type()
+        elif tag == 'T':
+            self.pos += 1
+            ok = True
+            while ok and not self.eat('E'):
+                ok = self.type()
+        elif tag in ('R', 'Q'):
+            self.pos += 1
+            ok = (not self.eat('L') or self.base62()) and self.type()
+        elif tag == 'F':
+            self.pos += 1
+            ok = self.fn_sig()
+        elif tag == 'D':
+            self.pos += 1
+            ok = self.dyn_bounds() and self.eat('L') and self.base62()
+        elif tag == 'W':
+            self.pos += 1
+            ok = self.type() and self.pattern()
+        else:
+            ok = self.path()
+        self.depth -= 1
+        return ok
+
+    def fn_sig(self):
+        if self.eat('G') and not self.base62():
+            return False
+        self.eat('U')
+        if self.eat('K') and not self.eat('C') and not self.undisambiguated_identifier():
+            return False
+        while not self.eat('E'):
+            if not self.type():
+                return False
+        return self.type()
+
+    def dyn_bounds(self):
+        if self.eat('G') and not self.base62():
+            return False
+        while not self.eat('E'):
+            if not self.path():
+                return False
+            while self.eat('p'):
+                if not self.undisambiguated_identifier():
+                    return False
+                if not (self.constant() if self.eat('K') else self.type()):
+                    return False
+        return True
+
+    def pattern(self):
+        self.depth += 1
+        if self.depth > _V0_MAX_DEPTH:
+            ok = False
+        elif self.eat('R'):
+            ok = self.constant() and self.constant()
+        elif self.eat('O'):
+            ok = True
+            while ok and not self.eat('E'):
+                ok = self.pattern()
+        else:
+            ok = False
+        self.depth -= 1
+        return ok
+
+    def constant(self):
+        self.depth += 1
+        tag = self.peek()
+        ok = self.depth <= _V0_MAX_DEPTH and tag != ''
+        if ok:
+            self.pos += 1
+            if tag == 'p':
+                ok = True
+            elif tag == 'B':
+                ok = self.base62()
+            elif tag in 'aslxni':
+                self.eat('n')
+                ok = self.hex_data()
+            elif tag in 'htmyojbce':
+                ok = self.hex_data()
+            elif tag == 'R' and self.eat('e'):
+                ok = self.hex_data()
+            elif tag in 'RQ':
+                ok = self.constant()
+            elif tag in 'AT':
+                ok = True
+                while ok and not self.eat('E'):
+                    ok = self.constant()
+            elif tag == 'V':
+                ok = self.path() and self.const_fields()
+            else:
+                ok = False
+        self.depth -= 1
+        return ok
+
+    def const_fields(self):
+        if self.eat('U'):
+            return True
+        named = self.eat('S')
+        if not named and not self.eat('T'):
+            return False
+        while not self.eat('E'):
+            if named and not self.identifier():
+                return False
+            if not self.constant():
+                return False
+        return True
+
+    def instantiated_stem(self):
+        if not self.eat('_') or not self.eat('R'):
+            return None
+        while self.peek() in _V0_DIGITS:
+            self.pos += 1
+        if not self.path():
+            return None
+        stem = self.pos
+        if self.pos < len(self.s) and self.path() and self.pos == len(self.s):
+            return stem
+        return None
+
+
+def _v0_stem(name):
+    if not name.startswith('_R'):
+        return None
+    try:
+        return _V0Symbol(name).instantiated_stem()
+    except RecursionError:
+        return None
+
+
+def _reach_key(entry):
+    if entry.endswith('*'):
+        return entry[:-1]
+    if len(entry) > 20 and _RUST_DISAMBIG.search(entry):
+        return _RUST_DISAMBIG.sub('', entry)
+    stem = _v0_stem(entry)
+    return entry if stem is None else entry[:stem]
+
+
+def _reach_int(value):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def parse_reachability(path):
+    # path: a .json report, a directory (preferring a reachability.json inside
+    # it, falling back to reached.txt/not_reached.txt), or a single
+    # allow/ignore .txt list. Returns (reachable, unreachable, conf,
+    # reach_keys, unreach_keys, loc, loc_base, reachable_qualified,
+    # unreachable_qualified) sets of function names; loc maps (full path, line)
+    # -> 'reachable'/'unreachable' for json-mode fallback, loc_base is the same
+    # keyed on basename(path) as a secondary fallback. reachable_qualified /
+    # unreachable_qualified map (basename(file), mangled) -> present. conf maps
+    # name -> the analyzer's 'high'/'medium'/'low' reachability confidence
+    # (JSON mode only; empty for txt/dir-of-txt-lists mode).
+    reachable: Set[str] = set()
+    unreachable: Set[str] = set()
+    conf: Dict[str, str] = {}
+    reach_keys: Set[str] = set()
+    unreach_keys: Set[str] = set()
+    loc: Dict[Tuple[str, int], str] = {}
+    loc_base: Dict[Tuple[str, int], str] = {}
+    reachable_qualified: Set[Tuple[str, str]] = set()
+    unreachable_qualified: Set[Tuple[str, str]] = set()
+    if not path:
+        return (reachable, unreachable, conf, reach_keys, unreach_keys,
+                loc, loc_base, reachable_qualified, unreachable_qualified)
+
+    def parse_txt(p):
+        names: Set[str] = set()
+        keys: Set[str] = set()
+        kind = None
+        with open(p, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith('#'):
+                    low = s.lower()
+                    if 'allowlist' in low:
+                        kind = 'allow'
+                    elif 'ignorelist' in low:
+                        kind = 'ignore'
+                    continue
+                if s.startswith('fun:'):
+                    names.add(s[4:].strip())
+                    keys.add(_reach_key(s[4:].strip()))
+        return kind, names, keys
+
+    if not os.path.exists(path):
+        raise ValueError('reachability path does not exist: %s' % path)
+    if os.path.isdir(path):
+        jpath = os.path.join(path, 'reachability.json')
+        if os.path.isfile(jpath):
+            print('using reachability.json (richer than the txt lists)', file=sys.stderr)
+            return parse_reachability(jpath)
+        rp = os.path.join(path, 'reached.txt')
+        npath = os.path.join(path, 'not_reached.txt')
+        if not os.path.isfile(rp) and not os.path.isfile(npath):
+            raise ValueError('reachability directory has no reachability.json, reached.txt, or not_reached.txt')
+        if os.path.isfile(rp):
+            _, reachable, reach_keys = parse_txt(rp)
+        if os.path.isfile(npath):
+            _, unreachable, unreach_keys = parse_txt(npath)
+    elif path.lower().endswith('.json'):
+        import json
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError('reachability JSON root must be an object')
+        if not isinstance(data.get('reachable', []), list):
+            raise ValueError('reachability JSON field "reachable" must be an array')
+        if not isinstance(data.get('unreachable_defined', []), list):
+            raise ValueError('reachability JSON field "unreachable_defined" must be an array')
+        for fn in data.get('reachable', []) or []:
+            if not isinstance(fn, dict):
+                raise ValueError('reachability JSON function entries must be objects')
+            mangled = fn.get('mangled')
+            demangled = fn.get('demangled')
+            names = [n for n in (mangled, demangled) if n]
+            if not names:
+                continue
+            for name in names:
+                reachable.add(name)
+                reach_keys.add(fn.get('key') or _reach_key(name))
+            c = fn.get('confidence')
+            if c:
+                for name in names:
+                    conf[name] = c
+            _ln = _reach_int(fn.get('line'))
+            if fn.get('file') and _ln is not None:
+                loc[(fn['file'], _ln)] = 'reachable'
+                loc_base[(os.path.basename(fn['file']), _ln)] = 'reachable'
+            if fn.get('file') and mangled:
+                reachable_qualified.add((os.path.basename(fn['file']), mangled))
+        for fn in data.get('unreachable_defined', []) or []:
+            if not isinstance(fn, dict):
+                raise ValueError('reachability JSON function entries must be objects')
+            mangled = fn.get('mangled')
+            demangled = fn.get('demangled')
+            names = [n for n in (mangled, demangled) if n]
+            if not names:
+                continue
+            for name in names:
+                unreachable.add(name)
+                unreach_keys.add(fn.get('key') or _reach_key(name))
+            _ln = _reach_int(fn.get('line'))
+            if fn.get('file') and _ln is not None:
+                loc[(fn['file'], _ln)] = 'unreachable'
+                loc_base[(os.path.basename(fn['file']), _ln)] = 'unreachable'
+            if fn.get('file') and mangled:
+                unreachable_qualified.add((os.path.basename(fn['file']), mangled))
+    elif path.lower().endswith('.txt') and os.path.isfile(path):
+        kind, names, keys = parse_txt(path)
+        if kind == 'ignore':
+            unreachable = names
+            unreach_keys = keys
+        else:
+            reachable = names
+            reach_keys = keys
+    else:
+        raise ValueError('reachability input must be a JSON report, report directory, or .txt list')
+    return (reachable, unreachable, conf, reach_keys, unreach_keys,
+            loc, loc_base, reachable_qualified, unreachable_qualified)
+
+
+def reach_state(name: str, reachable: Set[str], unreachable: Set[str],
+                 reach_keys: Set[str], unreach_keys: Set[str],
+                 reachable_qualified: Set[Tuple[str, str]] = frozenset(),
+                 unreachable_qualified: Set[Tuple[str, str]] = frozenset()):
+    # llvm-cov records local-linkage functions as "<src>:<symbol>".
+    n = name.rsplit(':', 1)[-1]
+    if ':' in name:
+        qk = (os.path.basename(name.rsplit(':', 1)[0]), n)
+        if qk in reachable_qualified:
+            return 'reachable'
+        if qk in unreachable_qualified:
+            return 'unreachable'
+    if name in reachable or n in reachable:
+        return 'reachable'
+    if name in unreachable or n in unreachable:
+        return 'unreachable'
+    k = _reach_key(n)
+    if k in reach_keys:
+        return 'reachable'
+    if k in unreach_keys:
+        return 'unreachable'
+    return None
+REACHPY
+}
+
+validate_reachability() {
+	local path="$1"
+	{
+		reach_py_lib
+		printf '%s\n' \
+			'parse_reachability(sys.argv[1])' \
+			'print("valid")'
+	} |
+		python3 - "$path" >/dev/null
+}
+
+write_source_response() {
+	local covjson="$1" response="$2"
+	python3 - "$covjson" "$response" <<'PYEOF'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding='utf-8'))
+paths = sorted({f['filename'] for obj in data.get('data', [])
+                for f in obj.get('files', []) if f.get('filename')})
+if not paths:
+    raise SystemExit('coverage JSON contains no source files')
+with open(sys.argv[2], 'w', encoding='utf-8') as out:
+    for path in paths:
+        if '\n' in path or '\r' in path:
+            raise SystemExit('source paths containing newlines are not supported')
+        out.write('"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
+PYEOF
+}
+
+# ── command: diff ────────────────────────────────────────────────────────────
+
+cmd_diff() {
+	local REPORT_DIR="."
+	# With no arguments and no default reports to diff in the current directory,
+	# there is nothing to do — print help instead of erroring (as if -h).
+	if test $# -eq 0 &&
+		! test -s "./coverage.json" &&
+		! test -s "./coverage_old.json"; then
+		usage_diff
+		exit 0
+	fi
+	local REACHABILITY=""
+	local ONLY_CHANGED=0
+	local -a POS=()
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		-o)
+			need_arg "-o" "${2-}"
+			REPORT_DIR="$2"
+			shift 2
+			;;
+		--reachability)
+			need_arg "--reachability" "${2-}"
+			REACHABILITY="$2"
+			shift 2
+			;;
+		--only-changed)
+			ONLY_CHANGED=1
+			shift
+			;;
+		-h | --help)
+			usage_diff
+			exit 0
+			;;
+		-V)
+			version_string
+			exit 0
+			;;
+		--)
+			shift
+			while [ $# -gt 0 ]; do
+				POS+=("$1")
+				shift
+			done
+			;;
+		-*)
+			err "Unknown option: $1"
+			echo "" >&2
+			usage_diff >&2
+			exit 1
+			;;
+		*)
+			POS+=("$1")
+			shift
+			;;
+		esac
+	done
+	local OLD="${POS[0]-}"
+	local NEW="${POS[1]-}"
+	test -z "$OLD" && OLD="$REPORT_DIR/coverage_old.json"
+	test -z "$NEW" && NEW="$REPORT_DIR/coverage.json"
+	test -s "$OLD" || {
+		err "The old JSON report does not exist: $OLD"
+		exit 1
+	}
+	test -s "$NEW" || {
+		err "The new JSON report does not exist: $NEW"
+		exit 1
+	}
+	if test -n "$REACHABILITY" && ! test -e "$REACHABILITY"; then
+		err "--reachability path does not exist: $REACHABILITY"
+		exit 1
+	fi
+	require_command python3 "cov-analysis diff" || exit 1
+	if test -n "$REACHABILITY" && ! validate_reachability "$REACHABILITY"; then
+		err "Invalid reachability input: $REACHABILITY"
+		exit 1
+	fi
+	local -a PYARGS=(-o "$REPORT_DIR/coverage_diff.html")
+	test "$ONLY_CHANGED" -eq 1 && PYARGS+=(--only-changed)
+	test -n "$REACHABILITY" && PYARGS+=(--reachability "$REACHABILITY")
+	PYARGS+=("$OLD" "$NEW")
+	{
+		reach_py_lib
+		cat <<'PYEOF'
+#
+# (c) 2026 Marc "vanHauser" Heuse
+#
+# License: GNU Affero General Public License 3
+#
+
+import argparse
+import html
+import json
+import os
+import re
+from pathlib import Path
+from typing import Dict, List, Tuple, Set
+
+
+def load_json(path: str):
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def merge_line_state(current: int, new: int) -> int:
+    # 0 = unknown/non-executable, 1 = uncovered, 2 = covered
+    if current == 2 or new == 2:
+        return 2
+    if current == 1 or new == 1:
+        return 1
+    return 0
+
+
+def extract_file_entries(root) -> Dict[str, List[dict]]:
+    entries: Dict[str, List[dict]] = {}
+    for obj in root.get('data', []):
+        for f in obj.get('files', []):
+            name = f.get('filename')
+            if not name:
+                continue
+            entries.setdefault(name, []).append(f)
+    return entries
+
+
+def line_states_from_segments(file_entry: dict, source_line_count: int = 0) -> Dict[int, int]:
+    # Reconstruct per-line executable/covered state from half-open file segments.
+    # Segment format is documented by llvm-cov export JSON tests as a list of
+    # [line, col, count, hasCount, isRegionEntry]. Newer LLVM may append fields,
+    # so we only use the first five when present.
+    segments = file_entry.get('segments', []) or []
+    states: Dict[int, int] = {}
+
+    segment_max = max((int(seg[0]) for seg in segments if len(seg) >= 1), default=0)
+    max_line = source_line_count or segment_max
+
+    for idx, cur in enumerate(segments):
+        if len(cur) < 4:
+            continue
+
+        if idx + 1 < len(segments):
+            nxt = segments[idx + 1]
+            if len(nxt) < 2:
+                continue
+            end_line = int(nxt[0])
+            end_col = int(nxt[1])
+        else:
+            if max_line <= 0:
+                continue
+            end_line = max_line + 1
+            end_col = 1
+
+        start_line = int(cur[0])
+        start_col = int(cur[1])
+        count = int(cur[2])
+        has_count = bool(cur[3])
+
+        if not has_count or start_line <= 0 or max_line <= 0:
+            continue
+        if (end_line, end_col) <= (start_line, start_col):
+            continue
+
+        new_state = 2 if count > 0 else 1
+        last_line = end_line if end_col > 1 else end_line - 1
+        last_line = min(last_line, max_line)
+        for line in range(start_line, last_line + 1):
+            states[line] = merge_line_state(states.get(line, 0), new_state)
+
+    return states
+
+
+def merge_line_states(file_entries: List[dict], source_line_count: int = 0) -> Dict[int, int]:
+    merged: Dict[int, int] = {}
+    for entry in file_entries:
+        for line, state in line_states_from_segments(entry, source_line_count).items():
+            merged[line] = merge_line_state(merged.get(line, 0), state)
+    return merged
+
+
+def extract_functions(root) -> Dict[str, Dict[str, bool]]:
+    # filename -> function name -> covered?
+    out: Dict[str, Dict[str, bool]] = {}
+    for obj in root.get('data', []):
+        for fn in obj.get('functions', []) or []:
+            name = fn.get('name', '<unknown>')
+            covered = int(fn.get('count', 0) or 0) > 0
+            filenames = fn.get('filenames', []) or []
+            if not filenames:
+                continue
+            for filename in filenames:
+                file_map = out.setdefault(filename, {})
+                file_map[name] = file_map.get(name, False) or covered
+    return out
+
+
+def read_source_lines(filename: str) -> List[str]:
+    try:
+        with open(filename, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def fmt_pct(numer: int, denom: int) -> str:
+    if denom <= 0:
+        return 'n/a'
+    return f'{(100.0 * numer / denom):.1f}%'
+
+
+def compute_file_diff(filename: str, base_lines: Dict[int, int], upd_lines: Dict[int, int],
+                      base_funcs: Dict[str, bool], upd_funcs: Dict[str, bool]) -> dict:
+    all_lines = sorted(set(base_lines) | set(upd_lines))
+    newly_covered = [ln for ln in all_lines if base_lines.get(ln, 0) != 2 and upd_lines.get(ln, 0) == 2]
+    no_longer_covered = [ln for ln in all_lines if base_lines.get(ln, 0) == 2 and upd_lines.get(ln, 0) != 2]
+    still_uncovered = [ln for ln in all_lines if base_lines.get(ln, 0) == 1 and upd_lines.get(ln, 0) == 1]
+    executable_now = [ln for ln in all_lines if upd_lines.get(ln, 0) in (1, 2)]
+    covered_now = [ln for ln in all_lines if upd_lines.get(ln, 0) == 2]
+    executable_before = [ln for ln in all_lines if base_lines.get(ln, 0) in (1, 2)]
+    covered_before = [ln for ln in all_lines if base_lines.get(ln, 0) == 2]
+
+    all_fn_names = sorted(set(base_funcs) | set(upd_funcs))
+    newly_covered_fns = [n for n in all_fn_names if not base_funcs.get(n, False) and upd_funcs.get(n, False)]
+    lost_fns = [n for n in all_fn_names if base_funcs.get(n, False) and not upd_funcs.get(n, False)]
+    still_uncovered_fns = [n for n in all_fn_names if not base_funcs.get(n, False) and not upd_funcs.get(n, False)]
+    covered_fns_before = sum(1 for n in all_fn_names if base_funcs.get(n, False))
+    covered_fns_now = sum(1 for n in all_fn_names if upd_funcs.get(n, False))
+
+    return {
+        'filename': filename,
+        'base_executable': len(executable_before),
+        'base_covered': len(covered_before),
+        'upd_executable': len(executable_now),
+        'upd_covered': len(covered_now),
+        'newly_covered': newly_covered,
+        'no_longer_covered': no_longer_covered,
+        'still_uncovered': still_uncovered,
+        'all_lines': all_lines,
+        'newly_covered_fns': newly_covered_fns,
+        'lost_fns': lost_fns,
+        'still_uncovered_fns': still_uncovered_fns,
+        'fn_total': len(all_fn_names),
+        'fn_covered_before': covered_fns_before,
+        'fn_covered_now': covered_fns_now,
+    }
+
+
+def make_snippet_ranges(lines_of_interest: List[int], max_context: int = 2) -> List[Tuple[int, int]]:
+    if not lines_of_interest:
+        return []
+    ranges: List[Tuple[int, int]] = []
+    for line in sorted(set(lines_of_interest)):
+        start = max(1, line - max_context)
+        end = line + max_context
+        if not ranges or start > ranges[-1][1] + 1:
+            ranges.append((start, end))
+        else:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+    return ranges
+
+
+def render_code_snippets(filename: str, diff: dict, source_lines: List[str]) -> str:
+    interesting = diff['newly_covered'] + diff['no_longer_covered'] + diff['still_uncovered']
+    ranges = make_snippet_ranges(interesting)
+    if not source_lines:
+        if not interesting:
+            return '<p class="muted">No line-level changes.</p>'
+        lis = ''.join(f'<li>{ln}</li>' for ln in interesting)
+        return f'<p class="muted">Source file not readable on disk. Interesting lines:</p><ul>{lis}</ul>'
+    if not ranges:
+        return '<p class="muted">No line-level changes.</p>'
+
+    parts = []
+    for start, end in ranges:
+        parts.append('<div class="snippet">')
+        parts.append(f'<div class="snippet-header">{html.escape(filename)}:{start}-{min(end, len(source_lines))}</div>')
+        parts.append('<table class="code">')
+        for ln in range(start, min(end, len(source_lines)) + 1):
+            src = html.escape(source_lines[ln - 1])
+            cls = []
+            label = ''
+            if ln in diff['newly_covered']:
+                cls.append('new-covered')
+                label = 'new'
+            elif ln in diff['no_longer_covered']:
+                cls.append('lost-covered')
+                label = 'lost'
+            elif ln in diff['still_uncovered']:
+                cls.append('still-uncovered')
+                label = 'still uncovered'
+            state = ' '.join(cls)
+            parts.append(
+                f'<tr class="{state}"><td class="ln">{ln}</td><td class="tag">{label}</td>'
+                f'<td class="src"><pre>{src}</pre></td></tr>'
+            )
+        parts.append('</table></div>')
+    return ''.join(parts)
+
+
+def render_html(diffs: List[dict], baseline_name: str, updated_name: str, output_path: str,
+                reachable: Set[str] = frozenset(), unreachable: Set[str] = frozenset(),
+                reach_keys: Set[str] = frozenset(),
+                unreach_keys: Set[str] = frozenset(),
+                reachable_qualified: Set[Tuple[str, str]] = frozenset(),
+                unreachable_qualified: Set[Tuple[str, str]] = frozenset(),
+                only_changed: bool = False):
+    has_reach = bool(reachable or unreachable)
+    total_new = sum(len(d['newly_covered']) for d in diffs)
+    total_lost = sum(len(d['no_longer_covered']) for d in diffs)
+    total_still = sum(len(d['still_uncovered']) for d in diffs)
+    total_new_fns = sum(len(d['newly_covered_fns']) for d in diffs)
+    total_lost_fns = sum(len(d['lost_fns']) for d in diffs)
+
+    changed_files = [d for d in diffs if d['newly_covered'] or d['no_longer_covered'] or d['newly_covered_fns'] or d['lost_fns']]
+    changed_files_count = len(changed_files)
+    scope = 'changed files only' if only_changed else 'all files'
+
+    rows = []
+    for d in diffs:
+        row_class = 'regressed' if d['no_longer_covered'] or d['lost_fns'] else ('improved' if d['newly_covered'] or d['newly_covered_fns'] else '')
+        rows.append(
+            '<tr class="%s">'
+            '<td><a href="#file-%s">%s</a></td>'
+            '<td>%s</td>'
+            '<td>%s</td>'
+            '<td>%d</td>'
+            '<td>%d</td>'
+            '<td>%d</td>'
+            '<td>%d</td>'
+            '<td>%d</td>'
+            '</tr>' % (
+                row_class,
+                html.escape(d['filename'], quote=True).replace('/', '_').replace(' ', '_'),
+                html.escape(d['filename']),
+                fmt_pct(d['base_covered'], d['base_executable']),
+                fmt_pct(d['upd_covered'], d['upd_executable']),
+                len(d['newly_covered']),
+                len(d['no_longer_covered']),
+                len(d['still_uncovered']),
+                len(d['newly_covered_fns']),
+                len(d['lost_fns']),
+            )
+        )
+
+    file_sections = []
+    for d in diffs:
+        file_id = html.escape(d['filename'], quote=True).replace('/', '_').replace(' ', '_')
+        src_lines = read_source_lines(d['filename'])
+        code = render_code_snippets(d['filename'], d, src_lines)
+
+        def render_fn_list(title: str, items: List[str], cls: str) -> str:
+            if not items:
+                return ''
+            chips = ''.join(f'<span class="chip {cls}">{html.escape(x)}</span>' for x in items[:200])
+            return f'<div class="fn-group"><div class="fn-title">{html.escape(title)}</div><div class="chips">{chips}</div></div>'
+
+        # Split "still uncovered" functions by reachability: reachable ones are
+        # actionable gaps (amber); statically-unreachable ones are expected dead
+        # weight (grey). Without reachability data, keep the single amber list.
+        still = d['still_uncovered_fns']
+        if has_reach:
+            reach_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) == 'reachable']
+            dead_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) == 'unreachable']
+            other_uncov = [n for n in still if reach_state(n, reachable, unreachable, reach_keys, unreach_keys, reachable_qualified, unreachable_qualified) is None]
+            still_html = (
+                render_fn_list('Still uncovered — reachable (actionable)', reach_uncov, 'chip-amber')
+                + render_fn_list('Still uncovered — unreachable (expected dead)', dead_uncov, 'chip-grey')
+                + render_fn_list('Still uncovered — not in reachability set', other_uncov, 'chip-amber')
+            )
+        else:
+            still_html = render_fn_list('Still uncovered functions', still, 'chip-amber')
+
+        file_sections.append(f'''
+<section id="file-{file_id}" class="file-card">
+  <div class="file-head">
+    <div>
+      <h2>{html.escape(d['filename'])}</h2>
+      <div class="muted">
+        lines: {fmt_pct(d['base_covered'], d['base_executable'])} → {fmt_pct(d['upd_covered'], d['upd_executable'])}
+        &nbsp;&nbsp; functions: {fmt_pct(d['fn_covered_before'], d['fn_total'])} → {fmt_pct(d['fn_covered_now'], d['fn_total'])}
+      </div>
+    </div>
+    <div class="pill-row">
+      <span class="pill green">+{len(d['newly_covered'])} new lines</span>
+      <span class="pill red">-{len(d['no_longer_covered'])} lost lines</span>
+      <span class="pill amber">{len(d['still_uncovered'])} still uncovered</span>
+    </div>
+  </div>
+  {render_fn_list('Newly covered functions', d['newly_covered_fns'], 'chip-green')}
+  {render_fn_list('No longer covered functions', d['lost_fns'], 'chip-red')}
+  {still_html}
+  {code}
+</section>
+''')
+
+    html_doc = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLVM coverage diff</title>
+<style>
+:root {{
+  --bg: #0b1020;
+  --panel: #121933;
+  --panel-2: #0f1530;
+  --text: #e8ecf8;
+  --muted: #9ea8c7;
+  --border: #27304f;
+  --green: #163a26;
+  --green-2: #1e7a45;
+  --red: #3d1720;
+  --red-2: #b0465d;
+  --amber: #413315;
+  --amber-2: #ba8f2a;
+  --blue: #4d8cff;
+}}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: linear-gradient(180deg, #0b1020, #09101b 30%, #081018); color: var(--text); }}
+.container {{ max-width: 1400px; margin: 0 auto; padding: 28px; }}
+header {{ display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 22px; }}
+h1 {{ margin: 0; font-size: 32px; }}
+.sub {{ color: var(--muted); margin-top: 8px; }}
+.cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 20px 0 26px; }}
+.card {{ background: rgba(18, 25, 51, 0.88); border: 1px solid var(--border); border-radius: 18px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }}
+.card .k {{ color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }}
+.card .v {{ font-size: 28px; margin-top: 8px; font-weight: 700; }}
+.table-wrap, .file-card {{ background: rgba(18, 25, 51, 0.88); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }}
+.table-wrap {{ overflow: hidden; margin-bottom: 26px; }}
+table.summary {{ width: 100%; border-collapse: collapse; }}
+table.summary th, table.summary td {{ padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.06); text-align: left; font-variant-numeric: tabular-nums; }}
+table.summary th {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; background: rgba(255,255,255,.02); }}
+table.summary tr:hover td {{ background: rgba(255,255,255,.025); }}
+table.summary tr.improved td:first-child {{ border-left: 4px solid var(--green-2); }}
+table.summary tr.regressed td:first-child {{ border-left: 4px solid var(--red-2); }}
+a {{ color: #a8c7ff; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+.file-card {{ padding: 18px; margin: 18px 0; }}
+.file-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 16px; }}
+.file-head h2 {{ margin: 0 0 8px; font-size: 20px; word-break: break-all; }}
+.muted {{ color: var(--muted); }}
+.pill-row {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+.pill {{ padding: 6px 10px; border-radius: 999px; font-size: 12px; border: 1px solid transparent; }}
+.pill.green {{ background: rgba(30,122,69,.16); border-color: rgba(30,122,69,.45); }}
+.pill.red {{ background: rgba(176,70,93,.16); border-color: rgba(176,70,93,.45); }}
+.pill.amber {{ background: rgba(186,143,42,.16); border-color: rgba(186,143,42,.45); }}
+.fn-group {{ margin: 14px 0; }}
+.fn-title {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }}
+.chips {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+.chip {{ padding: 6px 10px; border-radius: 999px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+.chip-green {{ background: rgba(30,122,69,.18); border: 1px solid rgba(30,122,69,.45); }}
+.chip-red {{ background: rgba(176,70,93,.18); border: 1px solid rgba(176,70,93,.45); }}
+.chip-amber {{ background: rgba(186,143,42,.18); border: 1px solid rgba(186,143,42,.45); }}
+.chip-grey {{ background: rgba(120,128,150,.16); border: 1px solid rgba(120,128,150,.4); color: var(--muted); }}
+.snippet {{ margin-top: 16px; border: 1px solid rgba(255,255,255,.06); border-radius: 14px; overflow: hidden; }}
+.snippet-header {{ padding: 10px 12px; background: rgba(255,255,255,.03); color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
+table.code {{ width: 100%; border-collapse: collapse; }}
+table.code td {{ vertical-align: top; border-bottom: 1px solid rgba(255,255,255,.04); }}
+table.code .ln {{ width: 72px; color: var(--muted); text-align: right; padding: 0 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; user-select: none; }}
+table.code .tag {{ width: 120px; padding: 0 10px; color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: .08em; }}
+table.code .src {{ width: auto; }}
+table.code pre {{ margin: 0; padding: 0 12px 0 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.45; }}
+tr.new-covered td {{ background: linear-gradient(90deg, rgba(30,122,69,.36), rgba(30,122,69,.12)); }}
+tr.lost-covered td {{ background: linear-gradient(90deg, rgba(176,70,93,.34), rgba(176,70,93,.10)); }}
+tr.still-uncovered td {{ background: linear-gradient(90deg, rgba(186,143,42,.25), rgba(186,143,42,.08)); }}
+footer {{ color: var(--muted); margin-top: 24px; font-size: 12px; }}
+@media (max-width: 920px) {{
+  .file-head {{ flex-direction: column; }}
+  table.summary {{ display: block; overflow-x: auto; }}
+}}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>LLVM coverage diff</h1>
+      <div class="sub">baseline: {html.escape(baseline_name)} &nbsp;→&nbsp; updated: {html.escape(updated_name)}</div>
+      <div class="sub">Aggregate scope: {scope}.</div>
+      {'<div class="sub">Reachability cross-reference active: still-uncovered functions are split into <b>reachable</b> (amber, actionable) and <b>unreachable</b> (grey, expected dead).</div>' if has_reach else ''}
+    </div>
+  </header>
+
+  <section class="cards">
+    <div class="card"><div class="k">Files with changes</div><div class="v">{changed_files_count}</div></div>
+    <div class="card"><div class="k">Newly covered lines — {scope}</div><div class="v">{total_new}</div></div>
+    <div class="card"><div class="k">No longer covered lines — {scope}</div><div class="v">{total_lost}</div></div>
+    <div class="card"><div class="k">Still uncovered lines — {scope}</div><div class="v">{total_still}</div></div>
+    <div class="card"><div class="k">Newly covered functions</div><div class="v">{total_new_fns}</div></div>
+    <div class="card"><div class="k">No longer covered functions</div><div class="v">{total_lost_fns}</div></div>
+  </section>
+
+  <div class="table-wrap">
+    <table class="summary">
+      <thead>
+        <tr>
+          <th>file</th>
+          <th>baseline lines</th>
+          <th>updated lines</th>
+          <th>new</th>
+          <th>lost</th>
+          <th>still uncovered</th>
+          <th>new fns</th>
+          <th>lost fns</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+  </div>
+
+  {''.join(file_sections)}
+
+  <footer>
+    Generated from llvm-cov export JSON. Line-level status is reconstructed from file segment data and is intended for practical diffing.
+  </footer>
+</div>
+</body>
+</html>'''
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_doc)
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Generate an HTML diff report from two llvm-cov export JSON files.')
+    ap.add_argument('baseline_json')
+    ap.add_argument('updated_json')
+    ap.add_argument('-o', '--output', default='coverage_diff.html', help='HTML output filename, default is "coverage_diff.html".')
+    ap.add_argument('--only-changed', action='store_true', help='Only include files with line/function coverage changes in the report.')
+    ap.add_argument('--reachability', default=None, help='fuzz-reachability JSON, its output directory, or a sancov .txt list. Splits still-uncovered functions into reachable vs unreachable.')
+    args = ap.parse_args()
+
+    (reachable, unreachable, _, reach_keys, unreach_keys, _, _,
+     reachable_qualified, unreachable_qualified) = parse_reachability(args.reachability)
+
+    baseline = load_json(args.baseline_json)
+    updated = load_json(args.updated_json)
+
+    base_file_entries = extract_file_entries(baseline)
+    upd_file_entries = extract_file_entries(updated)
+    base_funcs = extract_functions(baseline)
+    upd_funcs = extract_functions(updated)
+
+    filenames = sorted(set(base_file_entries) | set(upd_file_entries) | set(base_funcs) | set(upd_funcs))
+
+    diffs: List[dict] = []
+    for filename in filenames:
+        source_line_count = len(read_source_lines(filename))
+        diff = compute_file_diff(
+            filename,
+            merge_line_states(base_file_entries.get(filename, []), source_line_count),
+            merge_line_states(upd_file_entries.get(filename, []), source_line_count),
+            base_funcs.get(filename, {}),
+            upd_funcs.get(filename, {}),
+        )
+        if args.only_changed and not (
+            diff['newly_covered'] or diff['no_longer_covered'] or diff['newly_covered_fns'] or diff['lost_fns']
+        ):
+            continue
+        diffs.append(diff)
+
+    diffs.sort(key=lambda d: (
+        -(len(d['no_longer_covered']) + len(d['lost_fns']) > 0),
+        -(len(d['newly_covered']) + len(d['newly_covered_fns'])),
+        d['filename'],
+    ))
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    render_html(diffs, os.path.basename(args.baseline_json), os.path.basename(args.updated_json), str(out_path),
+                reachable, unreachable, reach_keys, unreach_keys,
+                reachable_qualified, unreachable_qualified, args.only_changed)
+
+
+if __name__ == '__main__':
+    main()
+PYEOF
+	} | python3 - "${PYARGS[@]}"
+	log "Coverage difference report written to $REPORT_DIR/coverage_diff.html"
+	exit 0
+}
+
+# ── reachability annotation of llvm-cov reports ──────────────────────────────
+# annotate_reachability <coverage.json> <reachability-path> <html-dir> <text-dir> <summary.txt>
+#
+# Cross llvm-cov coverage with the fuzz-reachability tool's output and annotate
+# the reports llvm-cov already produced, in place: tint each function's lines in
+# the HTML file view (dark grey = unreachable, amber = reachable but not reached,
+# purple = covered-yet-unreachable), add a per-line U/R/A marker column to the
+# text source view, and append a tally + actionable list to summary.txt. Prints
+# a one-line tally to stdout. <reachability-path> is a .json report, a directory
+# (preferring reachability.json inside it, else reached.txt / not_reached.txt),
+# or a single allow/ignore .txt list.
+# Shares reach_py_lib's parse_reachability/reach_state with cmd_diff.
+annotate_reachability() {
+	local COVJSON="$1" REACH="$2" HTML_DIR="$3" TEXT_DIR="$4" SUMMARY="$5" PERFUNC="${6:-}"
+	local VERDICTS="${7:-}"
+	{
+		reach_py_lib
+		cat <<'PYEOF'
+#
+# (c) 2026 Marc "vanHauser" Heuse
+#
+# License: GNU Affero General Public License 3
+#
+
+import html as htmlmod
+import json
+import os
+import re
+import sys
+
+cov_path, reach_path, html_dir, text_dir, summary_path = sys.argv[1:6]
+perfunc_path = sys.argv[6] if len(sys.argv) > 6 else ''
+verdict_path = sys.argv[7] if len(sys.argv) > 7 else ''
+
+
+def load_json(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+# ── parse the reachability input (json | dir | single .txt) ──────────────────
+(reachable, unreachable, conf, reach_keys, unreach_keys, loc, loc_base,
+ reachable_qualified, unreachable_qualified) = parse_reachability(reach_path)
+
+
+# ── parse coverage functions and classify ────────────────────────────────────
+def norm(name):
+    # llvm-cov records local-linkage functions as "<src>:<symbol>".
+    return name.rsplit(':', 1)[-1]
+
+
+funcs = []
+cov = load_json(cov_path)
+for obj in cov.get('data', []) or []:
+    for fn in obj.get('functions', []) or []:
+        name = fn.get('name', '')
+        filenames = fn.get('filenames', []) or []
+        if not name or not filenames:
+            continue
+        regions = fn.get('regions', []) or []
+        starts = [int(r[0]) for r in regions if len(r) >= 4]
+        ends = [int(r[2]) for r in regions if len(r) >= 4]
+        if not starts:
+            continue
+        own_code = [(int(r[0]), int(r[2])) for r in regions
+                    if len(r) >= 4 and (len(r) < 8 or (int(r[7]) == 0 and int(r[5]) == 0))]
+        funcs.append({
+            'name': name,
+            'norm': norm(name),
+            'count': int(fn.get('count', 0) or 0),
+            'file': filenames[0],
+            'start': min(starts),
+            'end': max(ends),
+            'code_lines': own_code or [(min(starts), max(ends))],
+        })
+
+for fn in funcs:
+    name, n = fn['name'], fn['norm']
+    rs = reach_state(name, reachable, unreachable, reach_keys, unreach_keys,
+                      reachable_qualified, unreachable_qualified)
+    is_reach = rs == 'reachable'
+    is_unreach = rs == 'unreachable'
+    if not is_reach and not is_unreach:
+        st = loc.get((fn['file'], fn['start']))
+        if st is None:
+            st = loc_base.get((os.path.basename(fn['file']), fn['start']))
+        if st == 'reachable':
+            is_reach = True
+        elif st == 'unreachable':
+            is_unreach = True
+    covered = fn['count'] > 0
+    fn['member'] = 'reachable' if is_reach else ('unreachable' if is_unreach else 'none')
+    if covered and is_unreach and not is_reach:
+        fn['state'] = 'anomaly'
+    elif covered:
+        fn['state'] = 'covered'
+    elif is_reach:
+        c = conf.get(name) or conf.get(n)
+        if c == 'low':
+            fn['state'] = 'reachable-unreached-low'
+        elif c == 'medium':
+            fn['state'] = 'reachable-unreached-indirect'
+        else:
+            fn['state'] = 'reachable-unreached'
+    elif is_unreach:
+        fn['state'] = 'unreachable'
+    else:
+        fn['state'] = 'unknown'
+
+t_reachable = sum(1 for f in funcs if f['member'] == 'reachable')
+t_unreachable = sum(1 for f in funcs if f['member'] == 'unreachable')
+UNREACHED_STATES = ('reachable-unreached', 'reachable-unreached-indirect', 'reachable-unreached-low')
+t_unreached = sum(1 for f in funcs if f['state'] in UNREACHED_STATES)
+t_anomaly = sum(1 for f in funcs if f['state'] == 'anomaly')
+actionable = sorted({f['name'] for f in funcs if f['state'] in UNREACHED_STATES})
+
+# ── per-file line -> state map: own each line by the function whose SMALLEST
+# code region contains it (llvm-cov's innermost-segment model), painting only a
+# function's own-file code regions. NOT the min..max envelope over all regions:
+# an inlined-macro expansion region is mapped to the macro's #define line, which
+# would stretch a function's span across the whole file and mistint unrelated
+# lines (e.g. a dead function shown amber because a live function's envelope
+# overlapped it). Ties go to a covered (executed) owner so real coverage is not
+# overpainted. ─────────────────────────────────────────────────────────────────
+line_state = {}
+_owner = {}
+for fn in funcs:
+    d = _owner.setdefault(fn['file'], {})
+    rank = 1 if fn['state'] == 'covered' else 0
+    for l0, l1 in fn['code_lines']:
+        span = l1 - l0
+        for ln in range(l0, l1 + 1):
+            cur = d.get(ln)
+            if cur is None or span < cur[0] or (span == cur[0] and rank > cur[1]):
+                d[ln] = (span, rank, fn['state'])
+for _f, _d in _owner.items():
+    line_state[_f] = {ln: v[2] for ln, v in _d.items()}
+
+
+def states_for(srcfile):
+    return line_state.get(srcfile) or line_state.get(os.path.basename(srcfile))
+
+
+HTML_CLASS = {
+    'reachable-unreached': 'reach-amber',
+    'reachable-unreached-indirect': 'reach-amber-indirect',
+    'reachable-unreached-low': 'reach-amber-low',
+    'unreachable': 'reach-grey',
+    'anomaly': 'reach-anomaly',
+}
+TEXT_MARK = {
+    'unreachable': 'U',
+    'reachable-unreached': 'R',
+    'reachable-unreached-indirect': 'R',
+    'reachable-unreached-low': 'R',
+    'anomaly': 'A',
+}
+
+# ── annotate the HTML file view ───────────────────────────────────────────────
+covdir = os.path.join(html_dir, 'coverage')
+if os.path.isdir(covdir):
+    for root, _, files in os.walk(covdir):
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                doc = f.read()
+            m = re.search(r"source-name-title'><pre>(.*?)</pre>", doc, re.S)
+            if not m:
+                continue
+            states = states_for(htmlmod.unescape(m.group(1)).strip())
+            if not states:
+                continue
+
+            def repl(mt, states=states):
+                seg = mt.group(0)
+                lm = re.search(r"name='L(\d+)'", seg)
+                if not lm:
+                    return seg
+                cls = HTML_CLASS.get(states.get(int(lm.group(1))))
+                if not cls:
+                    return seg
+                return seg.replace('<tr>', "<tr class='%s'>" % cls, 1)
+
+            doc = re.sub(r"<tr>.*?</tr>", repl, doc, flags=re.S)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(doc)
+
+# Append the CSS rules once to the shared stylesheet.
+css_path = os.path.join(html_dir, 'style.css')
+css_marker = 'cov-analysis reachability annotation'
+css_rules = """
+/* %s */
+tr.reach-grey td { background-color: #d0d0d0 !important; color: #777 !important; }
+tr.reach-grey .red { background-color: #d0d0d0 !important; color: #777 !important; }
+tr.reach-amber td.code { background-color: #fff3d6 !important; }
+tr.reach-amber-indirect td.code { background-color: #fff8e8 !important; }
+tr.reach-amber-low td.code { background-color: #fffdf5 !important; }
+tr.reach-anomaly td.code { background-color: #f3e8fd !important; }
+""" % css_marker
+if os.path.isfile(css_path):
+    with open(css_path, 'r', encoding='utf-8', errors='replace') as f:
+        cur = f.read()
+    if css_marker not in cur:
+        with open(css_path, 'a', encoding='utf-8') as f:
+            f.write(css_rules)
+
+# Inject a tally banner into index.html.
+idx = os.path.join(html_dir, 'index.html')
+if os.path.isfile(idx):
+    with open(idx, 'r', encoding='utf-8', errors='replace') as f:
+        doc = f.read()
+    if 'reach-banner' not in doc:
+        banner = (
+            "<div class='reach-banner' style='margin:10px;padding:8px 12px;"
+            "border:1px solid #ccc;border-radius:6px;font-family:sans-serif'>"
+            "<b>Reachability</b> (vs %s): %d reachable, "
+            "<span style='background:#fff3d6'>%d not yet reached</span> (amber), "
+            "<span style='background:#d0d0d0'>%d unreachable</span> (grey)%s"
+            "</div>" % (
+                htmlmod.escape(os.path.basename(reach_path)),
+                t_reachable, t_unreached, t_unreachable,
+                (", <span style='background:#f3e8fd'>%d covered-yet-unreachable</span>" % t_anomaly) if t_anomaly else "",
+            )
+        )
+        doc = doc.replace('<body>', '<body>' + banner, 1)
+        with open(idx, 'w', encoding='utf-8') as f:
+            f.write(doc)
+
+# ── annotate the text source view ─────────────────────────────────────────────
+tcovdir = os.path.join(text_dir, 'coverage')
+ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+src_re = re.compile(r'^(\s*\d+\|[^|]*\|)(.*)$')
+legend = '# reachability:  U=unreachable (dead)   R=reachable, not reached   A=covered yet unreachable'
+if os.path.isdir(tcovdir):
+    for root, _, files in os.walk(tcovdir):
+        for fname in files:
+            if not fname.endswith('.txt'):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.read().split('\n')
+            out = []
+            cur = None
+            for line in lines:
+                line = ansi_re.sub('', line)
+                m = src_re.match(line)
+                if m and cur is not None:
+                    ln = int(line.split('|', 1)[0].strip())
+                    mark = TEXT_MARK.get(cur.get(ln), ' ')
+                    out.append(m.group(1) + mark + ' ' + m.group(2))
+                    continue
+                stripped = line.rstrip()
+                head = stripped.lstrip()
+                if stripped.endswith(':') and not (head[:1].isdigit()):
+                    probe = stripped[:-1].strip()
+                    if probe in line_state or os.path.basename(probe) in line_state:
+                        cur = states_for(probe)
+                        out.append(line)
+                        if cur:
+                            out.append(legend)
+                    else:
+                        out.append(line)
+                    continue
+                out.append(line)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(out))
+
+# ── recompute coverage numbers excluding unreachable functions ────────────────
+# Per-function Regions/Lines/Branches come from `llvm-cov report -show-functions`
+# (authoritative; they sum to llvm-cov's own totals). We re-sum over the kept
+# functions (everything except those flagged unreachable) so every denominator
+# drops the statically-dead code. file_metrics: absfile -> dict of totals.
+def reach_member(name):
+    n = name.rsplit(':', 1)[-1]
+    if name in unreachable or n in unreachable:
+        return 'unreachable'
+    if name in reachable or n in reachable:
+        return 'reachable'
+    k = _reach_key(n)
+    if k in reach_keys:
+        return 'reachable'
+    if k in unreach_keys:
+        return 'unreachable'
+    return 'none'
+
+
+# The export functions (`funcs`) already carry the full layered join
+# (file-qualified static match -> exact name -> key -> (file,line) loc/loc_base
+# fallback) done in the classify loop above; index their outcome so
+# parse_perfunc's exclusion decision agrees with that classification instead of
+# re-deriving a thinner exact+key-only view via reach_member.
+#
+# `llvm-cov report -show-functions` groups its rows under `File '<path>':`
+# section headers and prints the BARE symbol for statics, so the recompute
+# disambiguates statics by (basename(file), symbol) via func_member_by_file_sym
+# -- the SAME qualified key reach_state uses for the tally -- letting a covered
+# reachable static and a dead static that merely share a bare name in different
+# files get their own verdicts. The residual the basename key cannot split is
+# same-named statics in different directories that share a basename; there, and
+# on any bare-name (func_member_by_norm) collision, all three maps resolve
+# reachable-wins so a live function is never dropped from the denominators. At
+# worst a same-named dead static is kept in, which only under-reports coverage
+# (matching the over-approximation philosophy).
+func_member_by_file_sym = {}
+func_member_by_full = {}
+func_member_by_norm = {}
+for _fn in funcs:
+    _fk = (os.path.basename(_fn['file']), _fn['norm'])
+    if func_member_by_file_sym.get(_fk) != 'reachable':
+        func_member_by_file_sym[_fk] = _fn['member']
+    if func_member_by_full.get(_fn['name']) != 'reachable':
+        func_member_by_full[_fn['name']] = _fn['member']
+    if func_member_by_norm.get(_fn['norm']) != 'reachable':
+        func_member_by_norm[_fn['norm']] = _fn['member']
+
+
+def perfunc_member(name, srcfile=None):
+    n = name.rsplit(':', 1)[-1]
+    if srcfile is not None:
+        fk = (os.path.basename(srcfile), n)
+        if fk in func_member_by_file_sym:
+            return func_member_by_file_sym[fk]
+    if name in func_member_by_full:
+        return func_member_by_full[name]
+    if n in func_member_by_norm:
+        return func_member_by_norm[n]
+    return reach_member(name)
+
+
+file_metrics = {}
+
+
+def blank_metric():
+    return {'fn': 0, 'fn_cov': 0, 'reg': 0, 'reg_cov': 0,
+            'line': 0, 'line_cov': 0, 'br': 0, 'br_cov': 0}
+
+
+def parse_perfunc(path):
+    cur = None
+    vout = open(verdict_path, 'w', encoding='utf-8') if verdict_path else None
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            s = line.rstrip('\n')
+            mh = re.match(r"^File '(.*)':\s*$", s.strip())
+            if mh:
+                cur = mh.group(1)
+                file_metrics.setdefault(cur, blank_metric())
+                continue
+            toks = s.split()
+            if cur is None or len(toks) < 10:
+                continue
+            name = toks[0]
+            if name in ('Name', 'TOTAL') or set(name) == {'-'}:
+                continue
+            try:
+                reg, reg_m = int(toks[1]), int(toks[2])
+                ln, ln_m = int(toks[4]), int(toks[5])
+                br, br_m = int(toks[7]), int(toks[8])
+            except (ValueError, IndexError):
+                continue
+            verdict = perfunc_member(name, cur)
+            if vout is not None:
+                vout.write('%s\t%s\t%s\n' % (verdict, cur, name))
+            if verdict == 'unreachable':
+                continue  # exclude statically-dead functions from every metric
+            m = file_metrics[cur]
+            m['fn'] += 1
+            m['fn_cov'] += 1 if (reg - reg_m) > 0 else 0   # executed iff a region ran
+            m['reg'] += reg
+            m['reg_cov'] += reg - reg_m
+            m['line'] += ln
+            m['line_cov'] += ln - ln_m
+            m['br'] += br
+            m['br_cov'] += br - br_m
+    if vout is not None:
+        vout.close()
+
+
+have_numbers = bool(perfunc_path) and os.path.isfile(perfunc_path)
+if have_numbers:
+    parse_perfunc(perfunc_path)
+
+grand = blank_metric()
+for m in file_metrics.values():
+    for k in grand:
+        grand[k] += m[k]
+
+
+def pct(cov, tot):
+    return (100.0 * cov / tot) if tot else 0.0
+
+
+def cov_color(cov, tot):
+    if tot == 0:
+        return 'column-entry-gray'
+    if cov == tot:
+        return 'column-entry-green'
+    return 'column-entry-red' if pct(cov, tot) < 80.0 else 'column-entry-yellow'
+
+
+def cell_text(cov, tot):
+    if tot == 0:
+        return '- (0/0)'
+    return '%6.2f%% (%d/%d)' % (pct(cov, tot), cov, tot)
+
+
+# ── reachability summary block (always) ───────────────────────────────────────
+block = []
+block.append('')
+block.append('== Reachability (vs %s) ==' % os.path.basename(reach_path))
+block.append('  reachable functions          : %d' % t_reachable)
+block.append('    of which not yet reached   : %d   <- amber, cover these' % t_unreached)
+block.append('  unreachable functions        : %d   <- dark grey, expected dead%s'
+             % (t_unreachable, ' (EXCLUDED from the numbers above)' if have_numbers else ''))
+if t_anomaly:
+    block.append('  covered yet unreachable      : %d   <- anomaly, investigate' % t_anomaly)
+block.append('')
+if actionable:
+    block.append('Reachable but NOT reached (actionable):')
+    block.extend('  ' + name for name in actionable)
+    block.append('')
+
+if have_numbers and os.path.isfile(summary_path):
+    # Replace summary.txt with a reachable-only table, then the block above.
+    rows = []
+    rows.append('Reachable-only coverage  (excludes %d statically-unreachable function(s); '
+                'full numbers remain in coverage.json)' % t_unreachable)
+    rows.append('')
+    rows.append('%-50s %-18s %-18s %-18s %-18s'
+                % ('Filename', 'Functions', 'Lines', 'Regions', 'Branches'))
+    rows.append('-' * 122)
+
+    def row_for(label, m):
+        return '%-50s %-18s %-18s %-18s %-18s' % (
+            label,
+            cell_text(m['fn_cov'], m['fn']),
+            cell_text(m['line_cov'], m['line']),
+            cell_text(m['reg_cov'], m['reg']),
+            cell_text(m['br_cov'], m['br']))
+
+    for fname in sorted(file_metrics):
+        rows.append(row_for(fname, file_metrics[fname]))
+    rows.append('-' * 122)
+    rows.append(row_for('TOTAL', grand))
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(rows) + '\n' + '\n'.join(block) + '\n')
+elif os.path.isfile(summary_path):
+    with open(summary_path, 'a', encoding='utf-8') as f:
+        f.write('\n'.join(block) + '\n')
+
+# ── patch the (flat) HTML index tables with the reachable-only numbers ────────
+def derive_absfile(href):
+    # Top-level flat index links files as coverage/<abs-source-path>.html
+    if href.startswith('coverage/') and href.endswith('.html'):
+        return href[len('coverage'):-len('.html')]
+    return None
+
+
+METRIC_CELL = re.compile(r"<td class='column-entry-[^']*'><pre>[^<]*</pre></td>")
+
+
+def patch_index(path):
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        doc = f.read()
+
+    def row_repl(mt):
+        row = mt.group(0)
+        m = None
+        am = re.search(r"<a href='([^']*)'>", row)
+        if am:
+            absf = derive_absfile(am.group(1))
+            if absf and absf in file_metrics:
+                m = file_metrics[absf]
+        elif '<pre>Totals</pre>' in row or '<pre>Total</pre>' in row:
+            m = grand
+        if m is None:
+            return row
+        cells = [
+            (m['fn_cov'], m['fn']), (m['line_cov'], m['line']),
+            (m['reg_cov'], m['reg']), (m['br_cov'], m['br']),
+        ]
+        it = iter(cells)
+
+        def cell_repl(cm):
+            try:
+                cov, tot = next(it)
+            except StopIteration:
+                return cm.group(0)
+            return ("<td class='%s'><pre>%s</pre></td>"
+                    % (cov_color(cov, tot), cell_text(cov, tot)))
+
+        return METRIC_CELL.sub(cell_repl, row)
+
+    doc = re.sub(r"<tr[^>]*>.*?</tr>", row_repl, doc, flags=re.S)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(doc)
+
+
+if have_numbers:
+    for root, _, files in os.walk(html_dir):
+        for fname in files:
+            if fname == 'index.html':
+                patch_index(os.path.join(root, fname))
+
+print('reachable=%d not-reached=%d unreachable=%d anomaly=%d'
+      % (t_reachable, t_unreached, t_unreachable, t_anomaly))
+PYEOF
+	} | python3 - "$COVJSON" "$REACH" "$HTML_DIR" "$TEXT_DIR" "$SUMMARY" "$PERFUNC" "$VERDICTS"
+}
+
+render_coverage_report() {
+	local llvm_cov="$1" dest="$2" profdata="$3" ignore="$4" reach="$5" work="$6"
+	shift 6
+	local primary="$1"
+	shift
+	local -a objects=()
+	local b
+	for b in "$@"; do objects+=("-object" "$b"); done
+
+	mkdir -p "$dest/html" "$dest/text"
+
+	local -a SHOW_OPTS=(
+		"$primary"
+		${objects[@]+"${objects[@]}"}
+		"-instr-profile=$profdata"
+		"-show-directory-coverage"
+		"-show-line-counts-or-regions"
+		"-show-branches=count"
+		"-ignore-filename-regex=$ignore"
+	)
+
+	# With --reachability the HTML index is rewritten with reachable-only numbers,
+	# which needs the flat single-table index — so drop -show-directory-coverage
+	# (its hierarchical multi-index layout) for the HTML output in that case.
+	local -a HTML_SHOW_OPTS=("${SHOW_OPTS[@]}")
+	if test -n "$reach"; then
+		local _o
+		local -a _filtered=()
+		for _o in "${HTML_SHOW_OPTS[@]}"; do
+			test "$_o" = "-show-directory-coverage" && continue
+			_filtered+=("$_o")
+		done
+		HTML_SHOW_OPTS=("${_filtered[@]}")
+	fi
+
+	log "Generating HTML report..."
+	"$llvm_cov" show "${HTML_SHOW_OPTS[@]}" \
+		-format=html \
+		-output-dir="$dest/html" || {
+		err "llvm-cov show (HTML) failed"
+		return 1
+	}
+
+	log "Generating text report..."
+	"$llvm_cov" show "${SHOW_OPTS[@]}" \
+		-format=text \
+		-use-color=false \
+		-output-dir="$dest/text" || {
+		err "llvm-cov show (text) failed"
+		return 1
+	}
+
+	log "Generating summary..."
+	"$llvm_cov" report "$primary" ${objects[@]+"${objects[@]}"} \
+		"-instr-profile=$profdata" \
+		"-ignore-filename-regex=$ignore" \
+		>"$dest/summary.txt" || {
+		err "llvm-cov report failed"
+		return 1
+	}
+
+	log "Generating JSON export..."
+	# llvm-cov quirk: --format=text emits JSON; --format=lcov emits LCOV.
+	"$llvm_cov" export "$primary" ${objects[@]+"${objects[@]}"} \
+		--format=text \
+		"-instr-profile=$profdata" \
+		"-ignore-filename-regex=$ignore" \
+		>"$dest/coverage.json" || {
+		err "llvm-cov export failed"
+		return 1
+	}
+
+	# ── per-function metrics ───────────────────────────────────────────────────
+	# They feed the gap inventory, and let the reachability annotator recompute
+	# Function/Line/Region/Branch coverage excluding unreachable functions.
+	local perfunc="$work/perfunc.txt"
+	local response="$work/sources.rsp"
+	: >"$perfunc"
+	if write_source_response "$dest/coverage.json" "$response" 2>/dev/null; then
+		if ! "$llvm_cov" report "$primary" ${objects[@]+"${objects[@]}"} \
+			"-instr-profile=$profdata" \
+			"-ignore-filename-regex=$ignore" \
+			-show-functions "@$response" >"$perfunc"; then
+			err "llvm-cov per-function report failed."
+			return 1
+		fi
+		if ! test -s "$perfunc"; then
+			err "llvm-cov per-function report was empty."
+			return 1
+		fi
+	elif test -n "$reach"; then
+		err "Could not build the source response file for reachable-only metrics."
+		return 1
+	else
+		logv "Coverage export lists no source files; the gap inventory will be empty."
+	fi
+
+	# ── reachability annotation (optional) ─────────────────────────────────────
+	local verdicts=""
+	if test -n "$reach"; then
+		log "Annotating reports with reachability..."
+		verdicts="$work/verdicts.tsv"
+		local tally=""
+		if ! tally="$(annotate_reachability "$dest/coverage.json" "$reach" \
+			"$dest/html" "$dest/text" "$dest/summary.txt" "$perfunc" "$verdicts")"; then
+			err "Reachability annotation failed."
+			return 1
+		fi
+		log "Reachability: $tally"
+	fi
+
+	# ── gap inventory ──────────────────────────────────────────────────────────
+	log "Building gap inventory..."
+	if ! write_gap_inventory "$perfunc" "$dest/gaps.txt" "$verdicts"; then
+		err "Could not build the gap inventory."
+		return 1
+	fi
+}
+
+# Replays on the host that holds the corpus and fetches only the merged
+# profile. -d and -e name REMOTE paths; the binary used for rendering is local.
+# Prints nothing; the fetched profile lands at $2.
+run_remote_replay() {
+	local host="$1" fetched="$2" opts="$3" remote_dir="$4"
+	local script rd rc=0
+	parse_ssh_opts "$opts" || return 1
+
+	script="$(realpath -e -- "${BASH_SOURCE[0]}" 2>/dev/null)" || {
+		err "Could not locate the cov-analysis script to copy to $host."
+		return 1
+	}
+
+	if test -n "$remote_dir"; then
+		rd="$(ssh ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} "$host" \
+			"mkdir -p -- $(printf '%q' "$remote_dir") && mktemp -d -- $(printf '%q' "$remote_dir/cov-analysis-remote.XXXXXX")")" || {
+			err "Could not create a private remote working directory under $host:$remote_dir"
+			return 1
+		}
+	else
+		rd="$(ssh ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} "$host" \
+			'mktemp -d "${TMPDIR:-/tmp}/cov-analysis-remote.XXXXXX"')" || {
+			err "Could not create a remote working directory on $host."
+			return 1
+		}
+	fi
+	if test -z "$rd"; then
+		err "The remote working directory path came back empty from $host."
+		return 1
+	fi
+	logv "Remote work dir : $host:$rd"
+	COV_REMOTE_HOST="$host"
+	COV_REMOTE_WORKDIR="$rd"
+
+	log "Copying cov-analysis to $host..."
+	if ! scp ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} "$script" \
+		"$host:$(printf '%q' "$rd/cov-analysis")"; then
+		err "Could not copy cov-analysis to $host."
+		remote_cleanup
+		return 1
+	fi
+
+	local remote_cmd
+	remote_cmd="echo \$\$ > $(printf '%q' "$rd/pid") && exec bash $(printf '%q' "$rd/cov-analysis") report"
+	remote_cmd="$remote_cmd -d $(printf '%q' "$AFL_DIR")"
+	remote_cmd="$remote_cmd -e $(printf '%q' "$COVERAGE_CMD")"
+	remote_cmd="$remote_cmd -o $(printf '%q' "$rd/out")"
+	remote_cmd="$remote_cmd --replay-only -t $FORKS -T $TIMEOUT"
+	remote_cmd="$remote_cmd --max-replay-failures $MAX_REPLAY_FAILURES"
+	test -n "$BATCH_SIZE" && remote_cmd="$remote_cmd --batch $BATCH_SIZE"
+	# Unset, the deadline is derived on the host, from the corpus that lives there.
+	test -n "$QUEUE_TIMEOUT" && remote_cmd="$remote_cmd --queue-timeout $QUEUE_TIMEOUT"
+	test -n "$FUZZER_LAYOUT" && remote_cmd="$remote_cmd --layout $FUZZER_LAYOUT"
+	test "$QUIET" -eq 1 && remote_cmd="$remote_cmd -q"
+	test "$VERBOSE" -eq 1 && remote_cmd="$remote_cmd -v"
+
+	log "Replaying on $host..."
+	if ! ssh ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} "$host" "$remote_cmd"; then
+		err "Remote replay failed on $host."
+		remote_cleanup
+		return 1
+	fi
+
+	log "Fetching the merged profile from $host..."
+	if ! scp ${COV_REMOTE_SSHOPTS[@]+"${COV_REMOTE_SSHOPTS[@]}"} \
+		"$host:$(printf '%q' "$rd/out/coverage.profdata")" "$fetched"; then
+		err "Could not fetch coverage.profdata from $host."
+		remote_cleanup
+		return 1
+	fi
+	remote_cleanup
+	if ! test -s "$fetched"; then
+		err "The profile fetched from $host is empty."
+		return 1
+	fi
+	return "$rc"
+}
+# write_attribution <out.txt> <out.html> <mismatch.txt> <name=lcov> [...]
+write_attribution() {
+	local out_txt="$1" out_html="$2" out_mismatch="$3"
+	shift 3
+	python3 - "$out_txt" "$out_html" "$out_mismatch" "$@" <<'PYEOF'
+#
+# (c) 2026 Marc "vanHauser" Heuse
+#
+# License: GNU Affero General Public License 3
+#
+
+import html as htmlmod
+import sys
+
+out_txt, out_html, out_mismatch = sys.argv[1], sys.argv[2], sys.argv[3]
+campaigns = []
+for arg in sys.argv[4:]:
+    name, _, path = arg.partition('=')
+    campaigns.append((name, path))
+
+# file -> line -> set of campaign indexes that executed it; plus every
+# instrumented line, so a file only one campaign knows still gets a total.
+instrumented = {}
+covered = {}
+# Per campaign, a fingerprint of how a file is instrumented: its line, branch
+# and function records. Two binaries built from different sources differ here
+# even when they instrument the same line numbers.
+per_campaign_shape = {}
+
+
+def parse_lcov(path, index):
+    current = None
+    with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+        for raw in handle:
+            line = raw.rstrip('\n')
+            if line.startswith('SF:'):
+                current = line[3:]
+                instrumented.setdefault(current, set())
+                covered.setdefault(current, {})
+                per_campaign_shape.setdefault(current, {}).setdefault(
+                    campaigns[index][0], set())
+            elif line.startswith('DA:') and current is not None:
+                body = line[3:].split(',')
+                if len(body) < 2:
+                    continue
+                try:
+                    number, count = int(body[0]), int(body[1])
+                except ValueError:
+                    continue
+                instrumented[current].add(number)
+                per_campaign_shape[current][campaigns[index][0]].add(('D', number))
+                if count > 0:
+                    covered[current].setdefault(number, set()).add(index)
+            elif line.startswith('BRDA:') and current is not None:
+                body = line[5:].split(',')
+                if len(body) >= 3:
+                    per_campaign_shape[current][campaigns[index][0]].add(
+                        ('B', body[0], body[1], body[2]))
+            elif line.startswith('FN:') and current is not None:
+                per_campaign_shape[current][campaigns[index][0]].add(
+                    ('F', line[3:]))
+            elif line == 'end_of_record':
+                current = None
+
+
+for index, (name, path) in enumerate(campaigns):
+    parse_lcov(path, index)
+
+rows = []
+for path in sorted(instrumented):
+    total = len(instrumented[path])
+    if total == 0:
+        continue
+    per_campaign = []
+    for index, (name, _) in enumerate(campaigns):
+        hit = sum(1 for owners in covered[path].values() if index in owners)
+        only = sum(1 for owners in covered[path].values()
+                   if owners == {index})
+        per_campaign.append({'name': name, 'covered': hit, 'unique': only})
+    best = max(per_campaign, key=lambda entry: entry['covered'])
+    union = len(covered[path])
+    rows.append({'file': path, 'total': total, 'union': union,
+                 'best': best['name'] if best['covered'] > 0 else '-',
+                 'campaigns': per_campaign})
+
+
+def percent(part, whole):
+    return 0.0 if whole == 0 else 100.0 * part / whole
+
+
+# Two binaries built from different sources instrument different lines of the
+# same file. llvm-cov keeps only one mapping and silently drops the functions
+# whose mapping differs, so the union under-reports without saying so.
+with open(out_mismatch, 'w', encoding='utf-8') as handle:
+    for path in sorted(per_campaign_shape):
+        seen = per_campaign_shape[path]
+        shapes = {}
+        for name, records in seen.items():
+            shapes.setdefault(frozenset(records), []).append(name)
+        if len(shapes) > 1:
+            described = '; '.join(
+                '%s: %d coverage records' % ('/'.join(sorted(names)), len(shape))
+                for shape, names in sorted(shapes.items(),
+                                           key=lambda item: sorted(item[1])))
+            handle.write('%s -- %s\n' % (path, described))
+
+
+with open(out_txt, 'w', encoding='utf-8') as handle:
+    handle.write('Per-file attribution across %d campaigns\n' % len(campaigns))
+    handle.write('=' * 39 + '\n\n')
+    handle.write('For every source file: how many instrumented lines each campaign\n')
+    handle.write('covered, and how many of those NO other campaign reached. A file\n')
+    handle.write('whose lines are all unique to one campaign is covered by that\n')
+    handle.write('harness alone - losing it loses the coverage.\n\n')
+    for row in rows:
+        handle.write('%s  (%d instrumented lines, %d covered by the union)\n'
+                     % (row['file'], row['total'], row['union']))
+        handle.write('    best: %s\n' % row['best'])
+        for entry in row['campaigns']:
+            handle.write('    %s %d covered, %d unique, %.2f%%\n'
+                         % (entry['name'], entry['covered'], entry['unique'],
+                            percent(entry['covered'], row['total'])))
+        handle.write('\n')
+    if not rows:
+        handle.write('(no instrumented lines found in any campaign)\n')
+
+with open(out_html, 'w', encoding='utf-8') as handle:
+    handle.write('<!DOCTYPE html>\n<html><head><meta charset="utf-8">\n')
+    handle.write('<title>cov-analysis campaign attribution</title>\n')
+    handle.write('<style>\n'
+                 'body{font-family:sans-serif;margin:2em;background:#fff;color:#222}\n'
+                 'table{border-collapse:collapse;width:100%}\n'
+                 'th,td{border:1px solid #ccc;padding:4px 8px;text-align:right}\n'
+                 'th:first-child,td:first-child{text-align:left;font-family:monospace}\n'
+                 'th{background:#eee}\n'
+                 'td.best{background:#d8f0d8;font-weight:bold}\n'
+                 'td.uniq{color:#8a4b00}\n'
+                 '</style></head><body>\n')
+    handle.write('<h1>Campaign attribution</h1>\n')
+    handle.write('<p>Lines covered per campaign, and lines only that campaign '
+                 'reached. The best campaign per file is highlighted.</p>\n')
+    handle.write('<table>\n<tr><th>File</th><th>Instrumented</th><th>Union</th>')
+    for name, _ in campaigns:
+        handle.write('<th>%s</th><th>%s unique</th>'
+                     % (htmlmod.escape(name), htmlmod.escape(name)))
+    handle.write('</tr>\n')
+    for row in rows:
+        handle.write('<tr><td>%s</td><td>%d</td><td>%d</td>'
+                     % (htmlmod.escape(row['file']), row['total'], row['union']))
+        for entry in row['campaigns']:
+            css = ' class="best"' if entry['name'] == row['best'] else ''
+            handle.write('<td%s>%d</td><td class="uniq">%d</td>'
+                         % (css, entry['covered'], entry['unique']))
+        handle.write('</tr>\n')
+    handle.write('</table>\n</body></html>\n')
+PYEOF
+}
+_list_contains() {
+	local needle="$1"
+	shift
+	local item
+	for item in "$@"; do
+		test "$item" = "$needle" && return 0
+	done
+	return 1
+}
+
+# Runs one full report per campaign, then a union report over all of them and a
+# per-file attribution table. Reads cmd_report's CAMP_* arrays and options.
+run_multi_campaign() {
+	local count="${#CAMP_DIRS[@]}" i
+	local -a names=() bins=() profdatas=()
+
+	for ((i = 0; i < count; i++)); do
+		if test -z "${CAMP_DIRS[$i]}"; then
+			err "Campaign $((i + 1)) has no input directory (-d)."
+			return 1
+		fi
+		if test -z "${CAMP_CMDS[$i]}"; then
+			err "Campaign $((i + 1)) (${CAMP_DIRS[$i]}) has no coverage command (-e)."
+			return 1
+		fi
+		if ! test -d "${CAMP_DIRS[$i]}"; then
+			err "Campaign input directory does not exist: ${CAMP_DIRS[$i]}"
+			return 1
+		fi
+		local n base k
+		n="${CAMP_NAMES[$i]}"
+		test -z "$n" && n="$(basename -- "${CAMP_DIRS[$i]}")"
+		n="${n//[^A-Za-z0-9._-]/_}"
+		test -z "$n" && n="campaign$((i + 1))"
+		base="$n"
+		k=2
+		# union/, attribution.* and the marker are the run's own artifacts
+		while _list_contains "$n" ${names[@]+"${names[@]}"} \
+			union attribution.txt attribution.html "$REPORT_MARKER_NAME"; do
+			n="${base}-${k}"
+			k=$((k + 1))
+		done
+		test "$n" = "${CAMP_NAMES[$i]}" || test -z "${CAMP_NAMES[$i]}" ||
+			log "Campaign name '${CAMP_NAMES[$i]}' is reserved; using '$n'"
+		names+=("$n")
+	done
+
+	local stage work
+	stage="$(mktemp -d "$REPORT_PARENT/.${REPORT_BASE}.cov-analysis.stage.XXXXXX")" || return 1
+	work="$(mktemp -d "$(tmp_base_dir)/cov-analysis-union.XXXXXX")" || return 1
+	COV_REPORT_CLEAN_STAGE="$stage"
+	COV_REPORT_CLEAN_PROFRAW="$work"
+	install_cleanup_traps
+	printf 'cov-analysis-report-v1\n' >"$stage/$REPORT_MARKER_NAME"
+
+	log "Campaigns       : $count"
+	log "Report directory: $REPORT_DIR"
+
+	for ((i = 0; i < count; i++)); do
+		log ""
+		log "== Campaign ${names[$i]} (${CAMP_DIRS[$i]}) =="
+		local -a argv=(-d "${CAMP_DIRS[$i]}" -e "${CAMP_CMDS[$i]}" -o "$stage/${names[$i]}"
+			-t "$FORKS" -T "$TIMEOUT" --ignore-regex "$IGNORE_REGEX"
+			--max-replay-failures "$MAX_REPLAY_FAILURES")
+		# Left unset, each campaign derives its own deadline from its own corpus.
+		test -n "$QUEUE_TIMEOUT" && argv+=(--queue-timeout "$QUEUE_TIMEOUT")
+		test -n "$BATCH_SIZE" && argv+=(--batch "$BATCH_SIZE")
+		test -n "${CAMP_BINS[$i]}" && argv+=(--binary "${CAMP_BINS[$i]}")
+		test -n "$REACHABILITY" && argv+=(--reachability "$REACHABILITY")
+		test -n "$FUZZER_LAYOUT" && argv+=(--layout "$FUZZER_LAYOUT")
+		test "$QUIET" -eq 1 && argv+=(-q)
+		test "$VERBOSE" -eq 1 && argv+=(-v)
+		if ! (cmd_report "${argv[@]}"); then
+			err "Campaign ${names[$i]} failed; nothing was published."
+			return 1
+		fi
+		local resolved
+		resolved="$(resolve_coverage_binary "${CAMP_CMDS[$i]}" "${CAMP_BINS[$i]}")" || return 1
+		bins+=("$resolved")
+		profdatas+=("$stage/${names[$i]}/coverage.profdata")
+	done
+
+	# ── union over every campaign ──────────────────────────────────────────────
+	log ""
+	log "== Union of $count campaigns =="
+	local -a ubins=()
+	local b
+	for b in "${bins[@]}"; do
+		_list_contains "$b" ${ubins[@]+"${ubins[@]}"} || ubins+=("$b")
+	done
+	local -a uobjects=()
+	for ((i = 1; i < ${#ubins[@]}; i++)); do uobjects+=("-object" "${ubins[$i]}"); done
+
+	mkdir -p "$stage/union"
+	printf 'cov-analysis-report-v1\n' >"$stage/union/$REPORT_MARKER_NAME"
+	printf '%s\n' "${profdatas[@]}" >"$work/profdata.manifest"
+	log "Merging $count campaign profile(s)..."
+	merge_profiles "$LLVM_PROFDATA" "$work" "$stage/union/coverage.profdata" \
+		"" "$work/profdata.manifest" || {
+		err "llvm-profdata merge of the campaign profiles failed"
+		return 1
+	}
+
+	# llvm-cov silently drops a function whose coverage mapping differs between
+	# two campaign binaries, which under-reports the union. Surface its warning.
+	"$LLVM_COV" report "${ubins[0]}" ${uobjects[@]+"${uobjects[@]}"} \
+		"-instr-profile=$stage/union/coverage.profdata" \
+		"-ignore-filename-regex=$IGNORE_REGEX" >/dev/null 2>"$work/objects.log" || true
+	if grep -qiE 'mismatch|out of date|malformed|does not match' "$work/objects.log"; then
+		err "Warning: coverage-mapping mismatch between the campaign binaries:"
+		sed 's/^/    /' "$work/objects.log" >&2
+		err "Functions whose mapping differs between binaries are dropped from the union."
+		err "Rebuild every campaign binary from the same sources to get a complete union."
+	fi
+
+	if ! render_coverage_report "$LLVM_COV" "$stage/union" \
+		"$stage/union/coverage.profdata" "$IGNORE_REGEX" "$REACHABILITY" "$work" \
+		"${ubins[@]}"; then
+		return 1
+	fi
+	if ! validate_staged_report "$stage/union" "$REACHABILITY"; then
+		err "The staged union report is incomplete or invalid."
+		return 1
+	fi
+
+	# ── per-file attribution ───────────────────────────────────────────────────
+	log ""
+	log "Building per-file attribution..."
+	local -a pairs=()
+	for ((i = 0; i < count; i++)); do
+		if ! "$LLVM_COV" export "${bins[$i]}" --format=lcov \
+			"-instr-profile=${profdatas[$i]}" \
+			"-ignore-filename-regex=$IGNORE_REGEX" >"$work/${names[$i]}.lcov"; then
+			err "llvm-cov export (lcov) failed for campaign ${names[$i]}"
+			return 1
+		fi
+		pairs+=("${names[$i]}=$work/${names[$i]}.lcov")
+	done
+	if ! write_attribution "$stage/attribution.txt" "$stage/attribution.html" \
+		"$work/mapping-mismatch.txt" "${pairs[@]}"; then
+		err "Could not build the attribution table."
+		return 1
+	fi
+	if test -s "$work/mapping-mismatch.txt"; then
+		err "Warning: coverage-mapping mismatch between the campaign binaries."
+		err "These files are instrumented differently in different campaigns:"
+		sed 's/^/    /' "$work/mapping-mismatch.txt" >&2
+		err "The binaries were built from different sources. llvm-cov keeps one"
+		err "mapping and drops the functions that differ, so the union under-reports."
+		err "Rebuild every campaign binary from the same sources."
+	fi
+
+	for ((i = 0; i < count; i++)); do
+		if ! owned_report "$stage/${names[$i]}"; then
+			err "Campaign report ${names[$i]} is incomplete."
+			return 1
+		fi
+	done
+	test -s "$stage/attribution.txt" || {
+		err "Attribution table is empty."
+		return 1
+	}
+
+	if ! publish_report "$stage" "$REPORT_DIR"; then
+		return 1
+	fi
+	COV_REPORT_CLEAN_STAGE=""
+
+	if test "$QUIET" -eq 0; then
+		echo ""
+		for ((i = 0; i < count; i++)); do
+			echo "[+] ${names[$i]} report : $REPORT_DIR/${names[$i]}/html/index.html"
+		done
+		echo "[+] Union report : file://$REPORT_DIR/union/html/index.html"
+		echo "[+] Union gaps   : $REPORT_DIR/union/gaps.txt"
+		echo "[+] Attribution  : $REPORT_DIR/attribution.txt"
+		echo "[+] Attribution  : file://$REPORT_DIR/attribution.html"
+	fi
+	return 0
+}
+# ── command: report ───────────────────────────────────────────────────────────
+
+cmd_report() {
+	# ── defaults ────────────────────────────────────────────────────────────────
+	local AFL_DIR=""
+	local COVERAGE_CMD=""
+	local REPORT_DIR=""
+	local TIMEOUT=5
+	local QUEUE_TIMEOUT=""
+	local FORKS=1
+	local FORCE=0
+	local CLEAN=0
+	local IGNORE_REGEX='/usr/include/'
+	local PROFRAW_DIR=""
+	local LLVM_PROFDATA=""
+	local LLVM_COV=""
+	local FUZZER_LAYOUT="${FUZZER_LAYOUT:-}"
+	local REACHABILITY=""
+	local BINARY_OVERRIDE=""
+	local MIGRATE_EXISTING=0
+	local STAGE_DIR=""
+	local MAX_REPLAY_FAILURES=99
+	local BATCH_SIZE=""
+	local REPLAY_ONLY=0
+	local REMOTE_HOST=""
+	local SSH_OPTS=""
+	local REMOTE_DIR=""
+	local -a PROFDATA_INPUTS=()
+	local -a CAMP_DIRS=() CAMP_CMDS=() CAMP_BINS=() CAMP_NAMES=()
+
+	# -d starts a campaign; -e, --binary and --name attach to the most recent one.
+	_camp_slot() {
+		if test "${#CAMP_DIRS[@]}" -eq 0; then
+			CAMP_DIRS+=("")
+			CAMP_CMDS+=("")
+			CAMP_BINS+=("")
+			CAMP_NAMES+=("")
+		fi
+	}
+	_camp_set() {
+		local field="$1" value="$2" last
+		_camp_slot
+		last=$((${#CAMP_DIRS[@]} - 1))
+		case "$field" in
+		cmd)
+			if test -n "${CAMP_CMDS[$last]}"; then
+				err "Two -e options for one campaign; each -e needs its own -d."
+				exit 1
+			fi
+			CAMP_CMDS[$last]="$value"
+			;;
+		bin) CAMP_BINS[$last]="$value" ;;
+		name) CAMP_NAMES[$last]="$value" ;;
+		esac
+	}
+
+	# ── argument parsing ───────────────────────────────────────────────────────
+	if test $# -eq 0; then
+		usage_report
+		exit 1
+	fi
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		-d)
+			need_arg "-d" "${2-}"
+			CAMP_DIRS+=("$2")
+			CAMP_CMDS+=("")
+			CAMP_BINS+=("")
+			CAMP_NAMES+=("")
+			shift 2
+			;;
+		-e)
+			need_arg "-e" "${2-}"
+			_camp_set cmd "$2"
+			shift 2
+			;;
+		--name)
+			need_arg "--name" "${2-}"
+			_camp_set name "$2"
+			shift 2
+			;;
+		-o)
+			need_arg "-o" "${2-}"
+			REPORT_DIR="$2"
+			shift 2
+			;;
+		-t)
+			need_arg "-t" "${2-}"
+			FORKS="$2"
+			shift 2
+			;;
+		-T)
+			need_arg "-T" "${2-}"
+			TIMEOUT="$2"
+			shift 2
+			;;
+		--queue-timeout)
+			need_arg "--queue-timeout" "${2-}"
+			QUEUE_TIMEOUT="$2"
+			shift 2
+			;;
+		--force)
+			FORCE=1
+			shift
+			;;
+		--clean)
+			CLEAN=1
+			shift
+			;;
+		-v)
+			VERBOSE=1
+			shift
+			;;
+		-q)
+			QUIET=1
+			shift
+			;;
+		-V)
+			version_string
+			exit 0
+			;;
+		-h | --help)
+			usage_report
+			exit 0
+			;;
+		--ignore-regex)
+			need_arg "--ignore-regex" "${2-}"
+			IGNORE_REGEX="$2"
+			shift 2
+			;;
+		--layout)
+			need_arg "--layout" "${2-}"
+			FUZZER_LAYOUT="$2"
+			shift 2
+			;;
+		--reachability)
+			need_arg "--reachability" "${2-}"
+			REACHABILITY="$2"
+			shift 2
+			;;
+		--binary)
+			need_arg "--binary" "${2-}"
+			_camp_set bin "$2"
+			shift 2
+			;;
+		--max-replay-failures)
+			need_arg "--max-replay-failures" "${2-}"
+			MAX_REPLAY_FAILURES="$2"
+			shift 2
+			;;
+		--batch)
+			need_arg "--batch" "${2-}"
+			BATCH_SIZE="$2"
+			shift 2
+			;;
+		--replay-only)
+			REPLAY_ONLY=1
+			shift
+			;;
+		--remote)
+			need_arg "--remote" "${2-}"
+			REMOTE_HOST="$2"
+			shift 2
+			;;
+		--ssh-opts) # its value is a flag string, so need_arg cannot vet it
+			if test $# -lt 2; then
+				err "Option --ssh-opts requires an argument"
+				exit 1
+			fi
+			SSH_OPTS="$2"
+			shift 2
+			;;
+		--remote-dir)
+			need_arg "--remote-dir" "${2-}"
+			REMOTE_DIR="$2"
+			shift 2
+			;;
+		--profdata)
+			need_arg "--profdata" "${2-}"
+			PROFDATA_INPUTS+=("$2")
+			shift 2
+			;;
+		--migrate-existing-report)
+			MIGRATE_EXISTING=1
+			shift
+			;;
+		*)
+			err "Unknown option: $1"
+			echo "" >&2
+			usage_report >&2
+			exit 1
+			;;
+		esac
+	done
+
+	local CAMP_COUNT="${#CAMP_DIRS[@]}"
+	if test "$CAMP_COUNT" -gt 0; then
+		AFL_DIR="${CAMP_DIRS[0]}"
+		COVERAGE_CMD="${CAMP_CMDS[0]}"
+		BINARY_OVERRIDE="${CAMP_BINS[0]}"
+	fi
+
+	# ── --clean: drop what runs that are no longer alive left behind ───────────
+	if test "$CLEAN" -eq 1; then
+		local CLEAN_DIR="$REPORT_DIR"
+		test -z "$CLEAN_DIR" && test -n "$AFL_DIR" && CLEAN_DIR="$AFL_DIR/cov"
+		if test -z "$CLEAN_DIR"; then
+			err "--clean needs the report directory: pass -o <dir>."
+			exit 1
+		fi
+		CLEAN_DIR="$(realpath -m -- "$CLEAN_DIR")" || {
+			err "Could not resolve report directory: $CLEAN_DIR"
+			exit 1
+		}
+		clean_report_workspace "$(dirname -- "$CLEAN_DIR")" "$(basename -- "$CLEAN_DIR")" || exit 1
+		return 0
+	fi
+
+	# ── validate inputs ────────────────────────────────────────────────────────
+	local RENDER_ONLY=0
+	test "${#PROFDATA_INPUTS[@]}" -gt 0 && RENDER_ONLY=1
+	if test "$RENDER_ONLY" -eq 1 && test "$REPLAY_ONLY" -eq 1; then
+		err "--replay-only and --profdata are mutually exclusive: one replays a corpus,"
+		err "the other renders profile data that was produced earlier."
+		exit 1
+	fi
+	if test -n "$REMOTE_HOST"; then
+		if test "$RENDER_ONLY" -eq 1; then
+			err "--remote replays a corpus; --profdata renders one that was already replayed."
+			exit 1
+		fi
+		if test "$CAMP_COUNT" -gt 1; then
+			err "--remote handles one campaign at a time."
+			exit 1
+		fi
+		if test -z "$BINARY_OVERRIDE"; then
+			err "--remote needs the LOCAL instrumented binary for rendering: pass --binary <path>."
+			err "-d and -e name paths on $REMOTE_HOST, which may differ from the local ones."
+			exit 1
+		fi
+		if test -z "$REPORT_DIR"; then
+			err "--remote cannot derive the report directory from a remote -d: pass -o <dir>."
+			exit 1
+		fi
+		require_command ssh "cov-analysis report --remote" || exit 1
+		require_command scp "cov-analysis report --remote" || exit 1
+	fi
+	if test "$RENDER_ONLY" -eq 1; then
+		if test -z "$COVERAGE_CMD" && test -z "$BINARY_OVERRIDE"; then
+			err "--profdata needs the instrumented binary: pass --binary <path> (or -e)."
+			exit 1
+		fi
+		if test -z "$REPORT_DIR"; then
+			err "--profdata has no input directory to derive the report directory from:"
+			err "pass -o <dir>."
+			exit 1
+		fi
+		local _pd
+		for _pd in "${PROFDATA_INPUTS[@]}"; do
+			if ! test -f "$_pd"; then
+				err "--profdata input does not exist: $_pd"
+				exit 1
+			fi
+		done
+	else
+		if test -z "$AFL_DIR"; then
+			err "Must specify input directory with -d (AFL++, libFuzzer, libafl, or honggfuzz)"
+			exit 1
+		fi
+		if test -z "$COVERAGE_CMD"; then
+			err "Must specify coverage command with -e"
+			exit 1
+		fi
+		if test -z "$REMOTE_HOST" && ! test -d "$AFL_DIR"; then
+			err "Input directory does not exist: $AFL_DIR"
+			exit 1
+		fi
+	fi
+	case "$FORKS" in
+	'' | *[!0-9]* | 0)
+		err "Replay worker count must be a positive integer: $FORKS"
+		exit 1
+		;;
+	esac
+	case "$TIMEOUT" in
+	'' | *[!0-9]* | 0)
+		err "Timeout (-T) must be a positive integer in seconds: $TIMEOUT"
+		exit 1
+		;;
+	esac
+	if test -n "$QUEUE_TIMEOUT"; then
+		case "$QUEUE_TIMEOUT" in
+		*[!0-9]*)
+			err "--queue-timeout must be a non-negative integer in seconds (0 = unbounded): $QUEUE_TIMEOUT"
+			exit 1
+			;;
+		esac
+	fi
+	if test -n "$BATCH_SIZE"; then
+		case "$BATCH_SIZE" in
+		*[!0-9]* | '')
+			err "--batch must be a non-negative integer (0 or 1 = one input per process): $BATCH_SIZE"
+			exit 1
+			;;
+		esac
+	fi
+	case "$MAX_REPLAY_FAILURES" in
+	'' | *[!0-9]*)
+		err "--max-replay-failures must be a percentage between 0 and 100: $MAX_REPLAY_FAILURES"
+		exit 1
+		;;
+	*)
+		if test "$MAX_REPLAY_FAILURES" -gt 100; then
+			err "--max-replay-failures must be a percentage between 0 and 100: $MAX_REPLAY_FAILURES"
+			exit 1
+		fi
+		;;
+	esac
+
+	# Validate explicit --layout override if supplied
+	if test -n "$FUZZER_LAYOUT"; then
+		case "$FUZZER_LAYOUT" in
+		afl | libafl | flat) ;;
+		*)
+			err "--layout must be 'afl', 'libafl' or 'flat' (got '$FUZZER_LAYOUT')"
+			exit 1
+			;;
+		esac
+	fi
+
+	# Validate --reachability path (a .json, a dir with reachability.json or
+	# reached.txt/not_reached.txt, or a single allow/ignore .txt list) if supplied.
+	if test -n "$REACHABILITY" && ! test -e "$REACHABILITY"; then
+		err "--reachability path does not exist: $REACHABILITY"
+		err "Pass the fuzz-reachability JSON, its output directory, or a sancov .txt list."
+		exit 1
+	fi
+
+	require_replay_commands "cov-analysis report" || exit 1
+	require_coreutils_command mv "cov-analysis report" || exit 1
+	require_coreutils_command realpath "cov-analysis report" || exit 1
+	require_command python3 "cov-analysis report" || exit 1
+	if test "$RENDER_ONLY" -eq 0 && test -z "$REMOTE_HOST"; then
+		AFL_DIR="$(resolve_input_dir "$AFL_DIR")" || exit 1
+	fi
+	if test -n "$REACHABILITY"; then
+		if ! validate_reachability "$REACHABILITY"; then
+			err "Invalid reachability input: $REACHABILITY"
+			exit 1
+		fi
+	fi
+
+	local COV_BINARY
+	COV_BINARY="$(resolve_coverage_binary "$COVERAGE_CMD" "$BINARY_OVERRIDE")" || exit 1
+	logv "Coverage binary: $COV_BINARY"
+
+	if test "$RENDER_ONLY" -eq 0; then
+		# Forgotten @@ on a driver binary → supply it automatically (argv-only input).
+		COVERAGE_CMD="$(add_at_if_driver "$COVERAGE_CMD" "$COV_BINARY")"
+		logv "Coverage command: $COVERAGE_CMD"
+		if test -n "$BATCH_SIZE" && test "$BATCH_SIZE" -gt 1 &&
+			test "${COVERAGE_CMD##* }" != "@@"; then
+			err "--batch $BATCH_SIZE needs a coverage command ending in @@: the input"
+			err "files are appended to it. Got: $COVERAGE_CMD"
+			exit 1
+		fi
+	fi
+
+	test -z "$REPORT_DIR" && REPORT_DIR="$AFL_DIR/cov"
+	REPORT_DIR="$(realpath -m -- "$REPORT_DIR")" || {
+		err "Could not resolve report directory: $REPORT_DIR"
+		exit 1
+	}
+	case "$REPORT_DIR" in
+	/ | "" | /usr | /usr/local | /etc | /var | /opt | /home | /root)
+		err "Refusing to use report directory: $REPORT_DIR"
+		err "Pick a dedicated subdirectory with -o."
+		exit 1
+		;;
+	esac
+	local REPORT_PARENT REPORT_BASE
+	REPORT_PARENT="$(dirname -- "$REPORT_DIR")"
+	REPORT_BASE="$(basename -- "$REPORT_DIR")"
+	mkdir -p -- "$REPORT_PARENT"
+	if test -e "$REPORT_DIR" && ! test -d "$REPORT_DIR"; then
+		err "Report destination exists and is not a directory: $REPORT_DIR"
+		exit 1
+	fi
+	if directory_nonempty "$REPORT_DIR" && ! owned_report "$REPORT_DIR"; then
+		if test "$MIGRATE_EXISTING" -ne 1; then
+			err "Refusing to replace unmarked non-empty directory: $REPORT_DIR"
+			err "Use an empty directory, a marked cov-analysis report, or --migrate-existing-report for a verified pre-marker report."
+			exit 1
+		fi
+		if ! valid_legacy_report "$REPORT_DIR"; then
+			err "The requested migration directory is not a complete pre-marker cov-analysis report: $REPORT_DIR"
+			exit 1
+		fi
+	fi
+
+	acquire_report_lock "$REPORT_PARENT" "$REPORT_BASE" "$FORCE" || exit 1
+	install_cleanup_traps
+
+	# ── detect LLVM tools ──────────────────────────────────────────────────────
+	LLVM_PROFDATA="$(find_tool llvm-profdata)" || {
+		err "llvm-profdata not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	LLVM_COV="$(find_tool llvm-cov)" || {
+		err "llvm-cov not found. Install LLVM (apt install llvm / dnf install llvm)."
+		exit 1
+	}
+	log "LLVM tools: $LLVM_PROFDATA, $LLVM_COV"
+
+	if test "$CAMP_COUNT" -gt 1; then
+		if test "$RENDER_ONLY" -eq 1 || test "$REPLAY_ONLY" -eq 1; then
+			err "Multiple campaigns cannot be combined with --profdata or --replay-only."
+			exit 1
+		fi
+		run_multi_campaign || exit 1
+		return 0
+	fi
+
+	if test -n "$REMOTE_HOST"; then
+		local REMOTE_WORK REMOTE_PROFDATA
+		REMOTE_WORK="$(mktemp -d "$(tmp_base_dir)/cov-analysis-remote.XXXXXX")" || exit 1
+		COV_REPORT_CLEAN_PROFRAW="$REMOTE_WORK"
+		install_cleanup_traps
+		REMOTE_PROFDATA="$REMOTE_WORK/coverage.profdata"
+		log "Remote host     : $REMOTE_HOST"
+		if ! run_remote_replay "$REMOTE_HOST" "$REMOTE_PROFDATA" "$SSH_OPTS" "$REMOTE_DIR"; then
+			exit 1
+		fi
+		PROFDATA_INPUTS=("$REMOTE_PROFDATA")
+		RENDER_ONLY=1
+	fi
+
+	# ── detect or honor fuzzer layout ──────────────────────────────────────────
+	if test "$RENDER_ONLY" -eq 0; then
+		if test -z "$FUZZER_LAYOUT"; then
+			FUZZER_LAYOUT="$(detect_fuzzer_layout)"
+		fi
+		case "$FUZZER_LAYOUT" in
+		afl) log "Fuzzer layout   : AFL++ (queue/crashes/hangs)" ;;
+		flat) log "Fuzzer layout   : flat (libFuzzer/libafl/honggfuzz)" ;;
+		libafl) log "Fuzzer layout   : LibAFL (corpus|queue, crashes|solutions)" ;;
+		empty)
+			err "No input files found in $AFL_DIR"
+			err "Expected one of: AFL++ or LibAFL output dir, libFuzzer/libafl corpus, honggfuzz workspace."
+			err "Override detection with --layout afl|libafl|flat if needed."
+			exit 1
+			;;
+		esac
+
+		# ── queue replay deadline ────────────────────────────────────────────────
+		# A corpus reliably holds inputs that do not terminate under coverage
+		# instrumentation. An input killed at the deadline contributes no coverage;
+		# a run that never finishes contributes none either, and costs hours.
+		if test -n "$QUEUE_TIMEOUT"; then
+			if test "$QUEUE_TIMEOUT" -eq 0; then
+				log "Queue timeout   : unbounded (--queue-timeout 0)"
+			else
+				log "Queue timeout   : ${QUEUE_TIMEOUT}s (--queue-timeout)"
+			fi
+		else
+			local Q_MS=0 Q_INSTANCES=0
+			read -r QUEUE_TIMEOUT Q_MS Q_INSTANCES \
+				< <(derive_queue_timeout "$AFL_DIR" "$FUZZER_LAYOUT")
+			if test "$Q_MS" -gt 0; then
+				log "Queue timeout   : ${QUEUE_TIMEOUT}s (slowest_exec_ms=$Q_MS over $Q_INSTANCES instance(s), x${QUEUE_TIMEOUT_FACTOR}, min ${QUEUE_TIMEOUT_MIN}s)"
+			else
+				log "Queue timeout   : ${QUEUE_TIMEOUT}s (no AFL++ fuzzer_stats to derive from)"
+			fi
+		fi
+	fi
+
+	# ── prepare workspace ──────────────────────────────────────────────────────
+	PROFRAW_DIR="$(mktemp -d "$(tmp_base_dir)/cov-analysis-profraw.XXXXXX")"
+	STAGE_DIR="$(mktemp -d "$REPORT_PARENT/.${REPORT_BASE}.cov-analysis.stage.XXXXXX")"
+	COV_REPORT_CLEAN_PROFRAW="$PROFRAW_DIR"
+	COV_REPORT_CLEAN_STAGE="$STAGE_DIR"
+	install_cleanup_traps
+	printf 'cov-analysis-report-v1\n' >"$STAGE_DIR/$REPORT_MARKER_NAME"
+	if test -s "$REPORT_DIR/coverage.json"; then
+		log "Preserving previous coverage.json as coverage_old.json"
+		cp -- "$REPORT_DIR/coverage.json" "$STAGE_DIR/coverage_old.json"
+	fi
+	export LLVM_PROFILE_FILE="$PROFRAW_DIR/cov-%p.profraw"
+
+	log "Report directory: $REPORT_DIR"
+	if test "$RENDER_ONLY" -eq 1; then
+		log "Profile inputs  : ${#PROFDATA_INPUTS[@]}"
+	else
+		log "Input directory : $AFL_DIR"
+		log "Replay workers : $FORKS"
+	fi
+	logv "Profraw temp dir: $PROFRAW_DIR"
+
+	# ── render-only: merge the supplied profiles and skip replay ───────────────
+	if test "$RENDER_ONLY" -eq 1; then
+		local PD_MANIFEST="$PROFRAW_DIR/profdata.manifest"
+		printf '%s\n' "${PROFDATA_INPUTS[@]}" >"$PD_MANIFEST"
+		log "Merging ${#PROFDATA_INPUTS[@]} profile(s)..."
+		merge_profiles "$LLVM_PROFDATA" "$PROFRAW_DIR" "$STAGE_DIR/coverage.profdata" \
+			"" "$PD_MANIFEST" || {
+			err "llvm-profdata merge failed"
+			exit 1
+		}
+	fi
+
+	# ── replay queue files ─────────────────────────────────────────────────────
+	if test "$RENDER_ONLY" -eq 0; then
+		local QUEUE_COUNT
+		QUEUE_COUNT=$(count_files find_queue_files)
+		if test "$QUEUE_COUNT" -eq 0 && test "$(count_files find_crash_timeout_files)" -eq 0; then
+			err "No input files found in $AFL_DIR for the $FUZZER_LAYOUT layout."
+			err "Override detection with --layout afl|libafl|flat if needed."
+			exit 1
+		fi
+		log "Replaying $QUEUE_COUNT queue files..."
+
+		local IS_DRIVER=0
+		if is_cov_driver_binary "$COV_BINARY"; then IS_DRIVER=1; fi
+		local QUEUE_STATS="0 0 0 0 0"
+
+		# Inputs that hit the deadline are named here, by the shell for one input per
+		# invocation and by the driver's own alarm inside a batch.
+		local SLOW_LOG="$PROFRAW_DIR/slow_inputs.txt"
+		: >"$SLOW_LOG"
+		export COV_TIMEOUT_LOG="$SLOW_LOG"
+		export COV_INPUT_TIMEOUT="$QUEUE_TIMEOUT"
+		local FALLBACK_LOG="$PROFRAW_DIR/batch_fallback.txt"
+		: >"$FALLBACK_LOG"
+
+		local BATCH_N
+		BATCH_N="$(resolve_batch_size "$COVERAGE_CMD" "$IS_DRIVER" "$BATCH_SIZE")"
+		if test "$BATCH_N" -gt 0 && test "$IS_DRIVER" -ne 1; then
+			logw "Batching $BATCH_N inputs per process on a binary that is not a"
+			logw "cov-analysis driver: it has no per-input alarm, so one input that does"
+			logw "not terminate holds its batch until the batch deadline, after which the"
+			logw "batch is replayed one input per process."
+		elif test "$BATCH_N" -eq 0 && test -z "$BATCH_SIZE" &&
+			test "${COVERAGE_CMD##* }" = "@@"; then
+			logw "Replaying one input per process: $COV_BINARY carries no cov-analysis"
+			logw "driver signature. If it takes several input files on argv, --batch $BATCH_SIZE_DEFAULT"
+			logw "replays that many per process and is far faster on a large corpus."
+		fi
+
+		case "$COVERAGE_CMD" in
+		*@@*)
+			if test "$BATCH_N" -gt 0; then
+				# Fast batch: strip trailing @@ and let xargs append all files at once.
+				# bash -c handles the same shell language as every other replay mode.
+				# Each batch profiles into its own directory (so a reused PID cannot
+				# make one batch overwrite another's profile) and reports its exit
+				# status and size for the replay tally, or one status per input when
+				# it had to be replayed one input per process.
+				local CMD_NO_AT="${COVERAGE_CMD% @@}" BATCH_CAP=0
+				test "$IS_DRIVER" -eq 1 || BATCH_CAP="$BATCH_DEADLINE_INPUTS"
+				logv "Queue replay: batch of $BATCH_N (xargs, workers=$FORKS)"
+				export COV_PROFRAW_DIR="$PROFRAW_DIR" COV_CMD="$CMD_NO_AT" \
+					COV_QUEUE_TIMEOUT="$QUEUE_TIMEOUT" COV_BATCH_CAP="$BATCH_CAP" \
+					COV_BATCH_FALLBACK_LOG="$FALLBACK_LOG"
+				export -f run_with_timeout command_for_input run_input_command \
+					run_input_command_unbounded record_slow_input replay_one_input \
+					replay_batch
+				# shellcheck disable=SC2016
+				QUEUE_STATS="$(find_queue_files | xargs -0 -r -n "$BATCH_N" -P "$FORKS" \
+					bash -c 'replay_batch "$COV_CMD" "$COV_QUEUE_TIMEOUT" "$COV_BATCH_CAP" "$COV_PROFRAW_DIR" "$@"' -- |
+					replay_tally "$IS_DRIVER" "$QUEUE_COUNT" "queue files" || true)"
+			else
+				# One input per process: @@ is embedded mid-command (e.g.
+				# "./cov -f @@ -extra"), or batching was not selected for this binary.
+				logv "Queue replay: loop (workers=$FORKS)"
+				export -f run_with_timeout command_for_input run_input_command \
+					run_input_command_unbounded record_slow_input replay_one_input
+				QUEUE_STATS="$(find_queue_files | number_inputs | xargs -0 -r -n 1 -P "$FORKS" \
+					bash -c 'replay_one_input "$1" "$2" "$3" "$4"' _ "$COVERAGE_CMD" "$QUEUE_TIMEOUT" "$PROFRAW_DIR" |
+					replay_tally "$IS_DRIVER" "$QUEUE_COUNT" "queue files" || true)"
+			fi
+			;;
+		*)
+			# No @@ — feed each file via stdin
+			logv "Queue replay: stdin loop (workers=$FORKS)"
+			export -f run_with_timeout command_for_input run_input_command \
+				run_input_command_unbounded record_slow_input replay_one_input
+			QUEUE_STATS="$(find_queue_files | number_inputs | xargs -0 -r -n 1 -P "$FORKS" \
+				bash -c 'replay_one_input "$1" "$2" "$3" "$4"' _ "$COVERAGE_CMD" "$QUEUE_TIMEOUT" "$PROFRAW_DIR" |
+				replay_tally "$IS_DRIVER" "$QUEUE_COUNT" "queue files" || true)"
+			;;
+		esac
+
+		local Q_TOTAL=0 Q_OK=0 Q_FAILED=0 Q_KILLED=0 Q_UNREADABLE=0
+		read -r Q_TOTAL Q_OK Q_FAILED Q_KILLED Q_UNREADABLE <<<"$QUEUE_STATS" || true
+		log "Queue replay   : $Q_OK ok, $Q_FAILED failed, $Q_KILLED timed out (of $Q_TOTAL)"
+		if test -s "$FALLBACK_LOG"; then
+			local FB_BATCHES FB_TOTAL
+			FB_BATCHES=$(grep -c . "$FALLBACK_LOG")
+			FB_TOTAL=$(((QUEUE_COUNT + BATCH_N - 1) / BATCH_N))
+			log "Batch fallback : $FB_BATCHES of $FB_TOTAL batches failed as a whole and were replayed one input per process"
+			if test "$FB_TOTAL" -ge 4 && test $((FB_BATCHES * 2)) -gt "$FB_TOTAL"; then
+				logw "Most batches failed as a whole, so most inputs ran twice. If the target"
+				logw "exits non-zero for inputs it rejects, --batch 0 runs each input once."
+			fi
+		fi
+
+		if test "$Q_UNREADABLE" -gt 0; then
+			err "The coverage driver could not read $Q_UNREADABLE of $Q_TOTAL queue inputs."
+			err "Coverage from this run would be wrong. Check that the inputs still exist"
+			err "and that the target can open them (a target that chroots cannot)."
+			exit 1
+		fi
+		local Q_BAD=$((Q_FAILED + Q_KILLED))
+		if test "$Q_TOTAL" -gt 0 && test "$Q_BAD" -gt 0; then
+			local Q_PCT=$((Q_BAD * 100 / Q_TOTAL))
+			if test "$Q_PCT" -gt "$MAX_REPLAY_FAILURES"; then
+				err "$Q_BAD of $Q_TOTAL queue inputs did not replay cleanly (${Q_PCT}%, limit ${MAX_REPLAY_FAILURES}%)."
+				err "Coverage from this run would be wrong: the target did not process its inputs."
+				err "If the target legitimately exits non-zero for rejected inputs, raise the"
+				err "limit with --max-replay-failures 100."
+				exit 1
+			fi
+			err "Warning: $Q_BAD of $Q_TOTAL queue inputs did not replay cleanly."
+		fi
+
+		# ── replay crashes and timeouts ────────────────────────────────────────────
+		local CRASH_COUNT
+		CRASH_COUNT=$(count_files find_crash_timeout_files)
+		if test "$CRASH_COUNT" -gt 0; then
+			log "Replaying $CRASH_COUNT crash/timeout files (timeout=${TIMEOUT}s each)..."
+			export -f run_with_timeout command_for_input run_input_command \
+				run_input_command_unbounded record_slow_input replay_one_input
+			export COV_INPUT_TIMEOUT="$TIMEOUT"
+			local CRASH_PROFRAW_DIR="$PROFRAW_DIR/crash"
+			mkdir -p "$CRASH_PROFRAW_DIR"
+			local CRASH_STATS
+			CRASH_STATS="$(find_crash_timeout_files | number_inputs | xargs -0 -r -n 1 -P "$FORKS" \
+				bash -c 'replay_one_input "$1" "$2" "$3" "$4"' \
+				_ "$COVERAGE_CMD" "$TIMEOUT" "$CRASH_PROFRAW_DIR" |
+				replay_tally "$IS_DRIVER" "$CRASH_COUNT" "crash files" || true)"
+			local C_TOTAL=0 C_OK=0 C_FAILED=0 C_KILLED=0 C_UNREADABLE=0
+			read -r C_TOTAL C_OK C_FAILED C_KILLED C_UNREADABLE <<<"$CRASH_STATS" || true
+			# Crash and timeout inputs are expected to die, so a non-zero exit is the
+			# desired outcome here and is not called a failure.
+			log "Crash replay   : $C_OK exited cleanly, $C_FAILED reproduced (non-zero exit, expected), $C_KILLED timed out (of $C_TOTAL)"
+			if test "$C_UNREADABLE" -gt 0; then
+				err "Warning: the coverage driver could not read $C_UNREADABLE of $C_TOTAL crash/timeout inputs."
+			fi
+		fi
+
+		# ── name the inputs that hit the deadline ─────────────────────────────────
+		if test -s "$SLOW_LOG"; then
+			local SLOW_COUNT SLOW_QT="${QUEUE_TIMEOUT}s"
+			test "$QUEUE_TIMEOUT" -eq 0 && SLOW_QT="unbounded"
+			SLOW_COUNT=$(sort -u -- "$SLOW_LOG" | wc -l)
+			{
+				printf '# inputs that exceeded their replay deadline (queue: %s, crash: %ss)\n' \
+					"$SLOW_QT" "$TIMEOUT"
+				sort -u -- "$SLOW_LOG"
+			} >"$STAGE_DIR/slow_inputs.txt"
+			logw "$SLOW_COUNT input(s) exceeded their replay deadline: $REPORT_DIR/slow_inputs.txt"
+			logw "An input that does not terminate under coverage instrumentation is a"
+			logw "finding in its own right; it contributed no coverage to this report."
+		fi
+
+		# ── check profraw files were generated ────────────────────────────────────
+		local PROFRAW_COUNT
+		PROFRAW_COUNT=$(find "$PROFRAW_DIR" -name '*.profraw' -printf . 2>/dev/null | wc -c)
+		if test "$PROFRAW_COUNT" -eq 0; then
+			err "No .profraw files generated."
+			err "Check that the binary is instrumented with -fprofile-instr-generate."
+			err "Use 'cov-analysis build' to build the coverage binary."
+			exit 1
+		fi
+		logv "Generated $PROFRAW_COUNT .profraw file(s)"
+
+		# ── merge profiles ─────────────────────────────────────────────────────────
+		log "Merging $PROFRAW_COUNT profile(s)..."
+		merge_profiles "$LLVM_PROFDATA" "$PROFRAW_DIR" "$STAGE_DIR/coverage.profdata" || {
+			err "llvm-profdata merge failed"
+			exit 1
+		}
+	fi
+
+	# ── replay-only: publish just the merged profile ───────────────────────────
+	if test "$REPLAY_ONLY" -eq 1; then
+		if ! validate_staged_profdata "$STAGE_DIR"; then
+			err "The staged profile is incomplete; the previous report was preserved."
+			exit 1
+		fi
+		if ! publish_report "$STAGE_DIR" "$REPORT_DIR"; then
+			exit 1
+		fi
+		STAGE_DIR=""
+		COV_REPORT_CLEAN_STAGE=""
+		if test "$QUIET" -eq 0; then
+			echo ""
+			echo "[+] Profile data : $REPORT_DIR/coverage.profdata"
+			echo "[+] Render it with: cov-analysis report --profdata $REPORT_DIR/coverage.profdata --binary <binary> -o <dir>"
+		fi
+		return 0
+	fi
+
+	# ── generate reports ───────────────────────────────────────────────────────
+	if ! render_coverage_report "$LLVM_COV" "$STAGE_DIR" "$STAGE_DIR/coverage.profdata" \
+		"$IGNORE_REGEX" "$REACHABILITY" "$PROFRAW_DIR" "$COV_BINARY"; then
+		exit 1
+	fi
+
+	if ! validate_staged_report "$STAGE_DIR" "$REACHABILITY"; then
+		err "The staged report is incomplete or invalid; the previous report was preserved."
+		exit 1
+	fi
+	if ! publish_report "$STAGE_DIR" "$REPORT_DIR"; then
+		exit 1
+	fi
+	STAGE_DIR=""
+	COV_REPORT_CLEAN_STAGE=""
+
+	# ── print summary ──────────────────────────────────────────────────────────
+	if test "$QUIET" -eq 0; then
+		echo ""
+		if test "$VERBOSE" -eq 1; then
+			echo "=== Coverage Summary ==="
+			cat "$REPORT_DIR/summary.txt"
+			echo ""
+		fi
+		if test -s "$REPORT_DIR/gaps.txt"; then
+			echo "Top coverage gaps (uncovered regions, uncovered lines, total, cover, file):"
+			awk '/^== Files by uncovered regions ==/ { insec = 1; next }
+           insec && substr($0, 1, 3) == "== " { exit }
+           insec && $0 ~ /^ *[0-9]/ { n++; if (n <= 10) print "    " $0 }' \
+				"$REPORT_DIR/gaps.txt"
+			echo ""
+		fi
+		echo "[+] HTML report  : file://$REPORT_DIR/html/index.html"
+		echo "[+] Text report  : $REPORT_DIR/text/"
+		echo "[+] Summary      : $REPORT_DIR/summary.txt"
+		echo "[+] Gap inventory: $REPORT_DIR/gaps.txt"
+		echo "[+] JSON export  : $REPORT_DIR/coverage.json"
+		echo "[+] Profile data : $REPORT_DIR/coverage.profdata"
+	fi
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+# Only run main logic when executed directly (not when sourced from tests).
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+	test $# -eq 0 && {
+		usage_main
+		exit 1
+	}
+
+	# Global flags before command detection
+	case "$1" in
+	-V)
+		version_string
+		exit 0
+		;;
+	-h | --help)
+		usage_main
+		exit 0
+		;;
+	esac
+
+	# Detect optional command; default to "report"
+	COMMAND="report"
+	case "$1" in
+	build | driver | report | diff | stability | search)
+		COMMAND="$1"
+		shift
+		;;
+	esac
+
+	case "$COMMAND" in
+	build) cmd_build "$@" ;;
+	driver) cmd_driver "$@" ;;
+	report) cmd_report "$@" ;;
+	diff) cmd_diff "$@" ;;
+	stability) cmd_stability "$@" ;;
+	search) cmd_search "$@" ;;
+	esac
+fi

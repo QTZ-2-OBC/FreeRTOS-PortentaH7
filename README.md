@@ -184,13 +184,47 @@ picocom -b 115200 -r -l "$TTY" --imap lfcrlf
 
 ### gen_seeds
 
+Inputs: CAMPAIGN_PATH
+
 Generate the seeds for fuzzing.
 
 ```bash
-cd ./Common/fuzzing/commands/
+CAMPAIGN_PATH=${CAMPAIGN_PATH:-./Common/fuzzing/commands/}
+cd "$CAMPAIGN_PATH"
 gcc -lm -O seeds.c -o seeds.exe
 
 mkdir -p seeds/
 cd ./seeds
 ../seeds.exe
+```
+
+### fuzzing
+
+Inputs: CAMPAIGN_PATH
+
+Fuzz a specific campaign.
+
+```bash
+CAMPAIGN_PATH=${CAMPAIGN_PATH:-./Common/fuzzing/commands/}
+xc gen_seeds "$CAMPAIGN_PATH"
+
+cd "$CAMPAIGN_PATH"
+afl-cc -g -lm -O -fprofile-instr-generate -fcoverage-mapping harness.c -o fuzzer.exe -fprofile-instr-generate
+AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_SKIP_CPUFREQ=1 afl-fuzz -i seeds/ -o output/ -s 69420 -- ./fuzzer.exe @@
+```
+
+### coverage
+
+Inputs: CAMPAIGN_PATH
+
+Generate coverage statistics from a campaign.
+
+```bash
+export PATH="$PWD:$PATH"
+CAMPAIGN_PATH=${CAMPAIGN_PATH:-./Common/fuzzing/commands/}
+xc gen_seeds "$CAMPAIGN_PATH"
+
+cd "$CAMPAIGN_PATH"
+cov-analysis.sh build afl-cc -lm -g -O -DCOVERAGE -fprofile-instr-generate -fcoverage-mapping harness.c -o fuzzer.exe -fprofile-instr-generate
+cov-analysis.sh -d output/ -e "./fuzzer.exe @@" -o covout
 ```
