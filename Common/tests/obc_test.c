@@ -1,31 +1,7 @@
+#define QTZ_LIB_IMPLEMENTATION
 #include "../../deps/unity/unity.h"
-#include "../common.c"
-#include "../debug.c"
-#include "../obc.c"
-#include "../obc_submodules_sdk.c"
-
-// =======================================
-// BEGIN STUB IMPLEMENTATIONS
-// =======================================
-// Stub implementation of logs. Since we're using the debug interface!
-// Comment out the implementation if the logs become to much...
-extern uint8_t __DEBUG_INNER_BUFFER[QTZ_DEBUG_CAPACITY];
-void QTZ_Debug_Print() {
-  // uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
-  // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
-}
-void QTZ_OBC_ArmInterrupts() {}
-void QTZ_OBC_BeginCritical() {};
-void QTZ_OBC_EndCritical() {};
-QTZ_OBC_OperationResult QTZ_OBC_SendI2C_IT(QTZ_ByteArray *msg) {
-  return QTZ_OBC_RESULT_OK;
-};
-QTZ_OBC_OperationResult QTZ_OBC_SendRS485_IT(QTZ_ByteArray *msg) {
-  return QTZ_OBC_RESULT_OK;
-};
-// =======================================
-// END STUB IMPLEMENTATIONS
-// =======================================
+#include "../obc.h"
+#include "./helpers/obc_stubs.c"
 
 void setUp() {}
 void tearDown() {}

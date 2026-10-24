@@ -1,6 +1,3 @@
-#ifndef __adcs_H
-#define __adcs_H
-
 typedef enum {
   QTZ_ADCS_Ping = 'p',  // "[P]ing" Ping the microcontroller to know
                         // if it's still alive.
@@ -12,5 +9,3 @@ typedef enum {
       'g', // "[G]et Data" Get sensor data from the microcontroller.
   QTZ_ADCS_Reset = 'r', // "[R]eset" Reset the microcontroller.
 } QTZ_ADCS_COMMAND;
-
-#endif

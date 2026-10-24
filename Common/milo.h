@@ -1,6 +1,3 @@
-#ifndef QTZ_LIB_MILO
-#define QTZ_LIB_MILO
-
 typedef enum {
   QTZ_MILO_Snapshot = 'S',             // '[S]napshot',
   QTZ_MILO_EnableEarthlimbModel = 'E', // 'MODEL [E]ARTHLIMB ON',
@@ -24,5 +21,3 @@ typedef enum {
   QTZ_MILO_CloudyLow = 'L',    // The label CloudyLow was identified
   QTZ_MILO_NoLabel = 'N',      // An invalid label was identified
 } QTZ_MILO_Labels;
-
-#endif

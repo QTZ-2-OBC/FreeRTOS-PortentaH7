@@ -1,5 +1,7 @@
 #include "../../deps/unity/unity.h"
-#include "../common.c"
+#define QTZ_LIB_IMPLEMENTATION
+#include "../obc.h"
+#include "./helpers/obc_stubs.c"
 #include <stdint.h>
 
 void setUp() {}
