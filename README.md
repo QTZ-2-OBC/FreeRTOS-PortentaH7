@@ -181,3 +181,16 @@ port...
 TTY=${TTY:-/dev/ttyACM0}
 picocom -b 115200 -r -l "$TTY" --imap lfcrlf
 ```
+
+### gen_seeds
+
+Generate the seeds for fuzzing.
+
+```bash
+cd ./Common/fuzzing/commands/
+gcc -lm -O seeds.c -o seeds.exe
+
+mkdir -p seeds/
+cd ./seeds
+../seeds.exe
+```
