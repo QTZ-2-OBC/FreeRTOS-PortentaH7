@@ -1,4 +1,4 @@
-from operator import index
+#from operator import index
 
 import random ##Solo para pruebas por ahora
 import sensor
@@ -112,7 +112,6 @@ def _send_bytes(datos_jpeg):
         print("Esperando reloj del Maestro para paquete", i + 1) #Enviar una respuesta con un caracter para activar la comunicación SPI
         try:
             # Mandamos el fragmento por SPI
-            # Modular el sistema para que no dependa de un solo comando
             spi.send(fragmento, timeout=2000)# Deben coincidir los timeout para evitar errores de envio
         except Exception as e:
             print("Error enviando paquete SPI:", e)
@@ -241,7 +240,7 @@ while True:
 
 
             ##-----------Enviar la metadata de la lista de imagenes.--------
-            elif cmd == 'MD':
+            #elif cmd == 'MD':
 
             # -------- CAPTURA --------
             elif cmd == 'S':
@@ -256,7 +255,13 @@ while True:
                 print("Guardada:", nombre)
                 #--------------------------------------
                 img_jpeg = img.compress(quality=50)
-                send_image(img_jpeg)
+                #Enviar una respuesta (Caracter) para activar SPI
+                reponse2 = "E" #Comando de activación
+                try:
+                    i2c.send(reponse2 + "\n")
+                except:
+                    pass
+                send_image(img_jpeg) #Función de envio de imagen.
 
                 print("Transmisión de imagen finalizada.")
 
@@ -273,7 +278,7 @@ while True:
                     img = sensor.snapshot()
                     rtc = pyb.RTC()
                     fecha_hora = rtc.datetime()
-                    nombre = "images/capture_%d%d%d_%d%d%d.jpg" % (fecha_hora[0], fecha_hora[1], fecha_hora[2], fecha_hora[4], fecha_hora[5], fecha_hora[6])
+                    nombre = "images/capture_%d%d%d_%d%d%d.jpg" % (fecha_hora[0], fecha_hora[1], fecha_hora[2], fecha_hora[4], fecha_hora[5], fecha_hora[6]) #Nombrar correctamente las imagenes
                     img.save(nombre,quality = 100)
                     gc.collect()
                     print("Guardo:", nombre)
@@ -300,8 +305,14 @@ while True:
                         #Mandamos por SPI las 3 imagenes mediante un bucle.
                         for img in send_imgs:
                             ruta_img = os.path.join(ruta, img)
-                            send_image(ruta_img)
-                            os.remove(ruta_img)
+
+                            reponse2 = "E" #Comando de activación SPI
+                            try:
+                                i2c.send(reponse2 + "\n")
+                            except:
+                                pass
+                            send_image(ruta_img) #Llamar función de envio de imagen
+                            os.remove(ruta_img) # Borras las imagenes de MILO
 
                         send_imgs.clear()
                         rand_arch = 0

@@ -21,7 +21,7 @@ uint16_t cant_comand = 0;
 
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(115200); // Pins 13 y 14
+  //Serial1.begin(115200); // Pins 13 y 14
   Wire.begin();
 
   pinMode(csPin, OUTPUT);
@@ -30,7 +30,7 @@ void setup() {
   //Configuración de comunicación SPI
   SPI.begin();
   SPI.setClockDivider(SPI_CLOCK_DIV8);
-  Serial.println("Hola, soy SPI Mega_Master");
+  Serial.println("Hola, soy SPI Master");
 
   pinMode(OPENMV_RESET_PIN, OUTPUT);
   digitalWrite(OPENMV_RESET_PIN, 1);
@@ -98,8 +98,8 @@ void sendCommand(char cmd) {
   Serial.println("'");
 
   digitalWrite(TX_ENABLE_PIN, HIGH);
-  Serial1.print (i2c_response);
-  Serial1.flush();
+  //Serial1.print (i2c_response);
+  //Serial1.flush();
   digitalWrite(TX_ENABLE_PIN, LOW);
 
 
@@ -107,7 +107,8 @@ void sendCommand(char cmd) {
   //------------------Logica para transmisión de Imagen -----------------
   //---------------------------------------------------------------------
 
-    if (cmd == 'S' && strncmp(i2c_response, "SIZE:", 5) == 0 || i2c_response == "S" ) {
+    if (i2c_response == "E" && strncmp(i2c_response, "SIZE:", 5) == 0) {
+    //if (cmd == 'S' && strncmp(i2c_response, "SIZE:", 5) == 0 || i2c_response == "S" ) {
         // Como prueba usar la S de respuesta para activar el modo envio por SPI
       int total_size = 0;
       int total_pkts = 0;
@@ -115,6 +116,7 @@ void sendCommand(char cmd) {
       // Extraemos los valores de la respuesta
       sscanf(i2c_response, "SIZE:%d,PKTS:%d", &total_size, &total_pkts);
 
+      //Se inicia la comunicación SPI
       Serial.print("Iniciando descarga SPI. Paquetes a leer: ");
       Serial.println(total_pkts);
 
@@ -147,8 +149,6 @@ void sendCommand(char cmd) {
           Serial.print(" ");
         }
         //-------------------------------------------------------------------
-
-
         Serial.println();
         Serial.print(p + 1);
         Serial.println(" recibido.");
@@ -202,7 +202,7 @@ void loop() {
 
     Serial.println("Reset HIGH");
     digitalWrite(OPENMV_RESET_PIN, HIGH);
-    Serial1.print("0DONE");
+    //Serial1.print("0DONE");
   }
   Serial.println("DONE!");
 
