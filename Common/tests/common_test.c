@@ -1,8 +1,13 @@
-#include "../../deps/unity/unity.h"
 #define QTZ_LIB_IMPLEMENTATION
+#include "../../deps/unity/unity.h"
 #include "../obc.h"
 #include "./helpers/obc_stubs.c"
 #include <stdint.h>
+
+void QTZ_Debug_Print() {
+  // uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
+  // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
+}
 
 void setUp() {}
 void tearDown() {}

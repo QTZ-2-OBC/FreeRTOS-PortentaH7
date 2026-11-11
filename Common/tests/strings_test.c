@@ -3,13 +3,14 @@
 #include "../obc.h"
 #include "./helpers/obc_stubs.c"
 
-void setUp(void) {
-  // set stuff up here
+void QTZ_Debug_Print() {
+  // uint16_t size = strlen((char *)__DEBUG_INNER_BUFFER);
+  // printf("%.*s", size, (char *)__DEBUG_INNER_BUFFER);
 }
 
-void tearDown(void) {
-  // clean stuff up here
-}
+void setUp(void) {}
+
+void tearDown(void) {}
 
 void test_QTZ_LengthAsString(void) {
   for (size_t i = 0; i < 10; i++) {

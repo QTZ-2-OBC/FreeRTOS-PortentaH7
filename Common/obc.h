@@ -779,16 +779,15 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
   if (p.subsys != QTZ_OBC_SUBSYSTEM_PORTENTA) {
     QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX
                   "Ignoring command since it doesn't belong to PortentaH7!");
-    return;
-  }
-
-  switch (p.protocol_id) {
-  case QTZ_OBC_PROTOCOL_HANDOVER: {
-    QTZ_OBC_HandleHandoverCommand(ctx, &p);
-  } break;
-  case QTZ_OBC_PROTOCOL_SUBSYSTEMS: {
-    QTZ_OBC_HandleSubsystemCommand(ctx, &p);
-  } break;
+  } else {
+    switch (p.protocol_id) {
+    case QTZ_OBC_PROTOCOL_HANDOVER: {
+      QTZ_OBC_HandleHandoverCommand(ctx, &p);
+    } break;
+    case QTZ_OBC_PROTOCOL_SUBSYSTEMS: {
+      QTZ_OBC_HandleSubsystemCommand(ctx, &p);
+    } break;
+    }
   }
 
   if (ctx->i2c.tx.length != 0) {
@@ -797,7 +796,8 @@ void QTZ_OBC_Routine_Tick(QTZ_OBC_Ctx *ctx) {
                       "Failed to arm the I2C msg transmission!");
       ctx->state = QTZ_OBC_STATE_ERROR;
     } else {
-      QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX "I2C packet armed!");
+      QTZ_Debug_Log(QTZ_OBC_ROUTINE_PREFIX "I2C   packet armed! length: %d",
+                    ctx->i2c.tx.length);
     }
   }
 
